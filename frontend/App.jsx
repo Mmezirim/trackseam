@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, createContext, useContext } from "react";
 import { jsPDF } from "jspdf";
+import Logo from "./assets/trackseamlogo.jpeg"
 
 // CONFIG 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8080/api";
@@ -338,12 +339,12 @@ function AuthPage({ onAuth }) {
     <div className="auth-page">
       <div className="auth-card">
         <div className="auth-brand">
-          <span className="brand-mark">✦</span>
+          <img className="auth-logo" src={Logo} alt="Trackseam Logo" />
           <span className="brand-name">Trackseam</span>
-        </div>
-        <p className="auth-tagline">
-          {mode === "login" ? "Sign in to your shop account" : "Create your tailor shop account"}
-        </p>
+          <p className="auth-tagline">
+                  {mode === "login" ? "Sign in to your shop account" : "Create your tailor shop account"}
+          </p>
+</div>
 
         <div className="form-grid">
           {mode === "register" && (
@@ -843,22 +844,101 @@ const CSS = `
   /* ── AUTH ── */
   .auth-page { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; background: var(--bg); }
   .auth-card { width: 100%; max-width: 420px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 36px 32px; box-shadow: var(--shadow-lg); }
-  .auth-brand { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
-  .auth-tagline { font-family: var(--mono); font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 28px; }
+    .auth-brand {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 20px;
+  }
+  .auth-logo {
+    width: 100px;
+    height: 60px;
+    // margin-bottom: -145px;
+    // margin-top: -80px;
+    transition: transform 0.3s ease, opacity 0.3s ease;
+  }
+  .auth-logo:hover {
+    transform: scale(1.05);
+    opacity: 0.85;
+  }
+    .auth-brand .brand-name {
+    font-family: var(--serif);
+    font-size: 26px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: var(--text);
+    line-height: 1;
+  }
+
+  .auth-tagline { font-family: var(--mono); font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 28px; margin: auto;}
   .auth-error { font-family: var(--mono); font-size: 12px; color: var(--danger); background: var(--danger-light); padding: 8px 12px; border-radius: var(--radius); }
   .auth-switch { margin-top: 20px; font-size: 14px; color: var(--text-muted); text-align: center; }
   .link-btn { background: none; border: none; cursor: pointer; font-family: var(--serif); font-size: 14px; color: var(--text); text-decoration: underline; padding: 0; }
 
+
   /* ── HEADER ── */
   .header { background: var(--text); color: var(--accent-fg); border-bottom: 2px solid var(--text); }
-  .header-inner { max-width: 960px; margin: 0 auto; padding: 16px 24px; display: flex; align-items: center; gap: 16px; }
-  .brand { display: flex; align-items: center; gap: 10px; }
+.header-inner { 
+  max-width: 960px; 
+  margin: 0 auto; 
+  padding: 12px 24px; 
+  display: grid; 
+  grid-template-columns: 1fr auto; 
+  grid-template-rows: auto auto; 
+  align-items: center; 
+  gap: 0 16px; 
+}
+.brand { 
+  display: flex; 
+  align-items: center; 
+  gap: 10px; 
+  grid-column: 1; 
+  grid-row: 1; 
+}
   .brand-mark { font-size: 18px; opacity: 0.7; }
   .brand-name { font-family: var(--serif); font-size: 22px; font-weight: 600; letter-spacing: 0.02em; }
-  .header-shop { display: flex; flex-direction: column; margin-left: 20px; border-left: 1px solid rgba(250,250,248,0.2); padding-left: 20px; }
+  .header-shop { 
+  display: flex; 
+  flex-direction: row; 
+  align-items: center; 
+  gap: 8px; 
+  grid-column: 1; 
+  grid-row: 2; 
+  padding-left: 28px; 
+}
+.header-shop-name { 
+  font-family: var(--serif); 
+  font-size: 13px; 
+  font-weight: 500; 
+  opacity: 0.75; 
+}
+.header-tagline { 
+  font-family: var(--mono); 
+  font-size: 10px; 
+  letter-spacing: 0.08em; 
+  text-transform: uppercase; 
+  opacity: 0.4; 
+}
   .header-shop-name { font-family: var(--serif); font-size: 15px; font-weight: 500; opacity: 0.9; }
   .header-tagline { font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.4; }
-  .logout-btn { margin-left: auto; background: none; border: 1px solid rgba(250,250,248,0.25); color: var(--accent-fg); padding: 6px 14px; border-radius: var(--radius); font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer; opacity: 0.7; transition: opacity 0.15s; }
+  .logout-btn { 
+  grid-column: 2; 
+  grid-row: 1; 
+  background: none; 
+  border: 1px solid rgba(250,250,248,0.25); 
+  color: var(--accent-fg); 
+  padding: 6px 14px; 
+  border-radius: var(--radius); 
+  font-family: var(--mono); 
+  font-size: 11px; 
+  letter-spacing: 0.06em; 
+  text-transform: uppercase; 
+  cursor: pointer; 
+  opacity: 0.7; 
+  transition: opacity 0.15s; 
+  align-self: center;
+}
   .logout-btn:hover { opacity: 1; }
 
   /* ── MAIN ── */
@@ -960,13 +1040,16 @@ const CSS = `
   .empty-state p { margin-bottom: 20px; font-size: 16px; }
 
   /* ── RESPONSIVE ── */
-  @media (max-width: 640px) {
-    .table-header, .table-row { grid-template-columns: 1.5fr 1fr 40px; }
-    .table-header span:nth-child(3), .table-row span:nth-child(3),
-    .table-header span:nth-child(4), .table-row span:nth-child(4) { display: none; }
-    .detail-header { flex-direction: column; gap: 12px; }
-    .btn-primary { margin-left: 0 !important; }
-    .header-shop { display: none; }
-    .auth-card { padding: 28px 20px; }
-  }
+@media (max-width: 640px) {
+  .table-header, .table-row { grid-template-columns: 1.5fr 1fr 40px; }
+  .table-header span:nth-child(3), .table-row span:nth-child(3),
+  .table-header span:nth-child(4), .table-row span:nth-child(4) { display: none; }
+  .detail-header { flex-direction: column; gap: 12px; }
+  .btn-primary { margin-left: 0 !important; }
+  .auth-card { padding: 28px 20px; }
+  .auth-logo { width: 56px; height: 40px; }
+  .header-inner { padding: 10px 16px; }
+  .header-shop { padding-left: 22px; }
+  .header-tagline { font-size: 8px }
+}
 `;
