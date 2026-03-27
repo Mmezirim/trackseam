@@ -11,7 +11,9 @@ const app = express();
 
 // MIDDLEWARE
 app.use(cors({
-  origin: process.env.CLIENT_ORIGIN || "http://localhost:3002",
+  origin: (origin, callback) => {
+    callback(null, true);
+  },
   credentials: true,
 }));
 app.use(express.json());

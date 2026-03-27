@@ -3,7 +3,7 @@ import { jsPDF } from "jspdf";
 import Logo from "./assets/trackseamlogo.jpeg"
 
 // CONFIG 
-const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8080/api";
+const API_BASE = import.meta.env.VITE_API_BASE;
 
 // AUTH CONTEXT
 const AuthContext = createContext(null);
