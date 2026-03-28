@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Trackseam</string>
+    <string name="title_activity_main">Trackseam</string>
+    <string name="package_name">com.trackseam.app</string>
+    <string name="custom_url_scheme">com.trackseam.app</string>
+</resources>
