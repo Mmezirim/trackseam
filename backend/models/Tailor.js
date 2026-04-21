@@ -6,6 +6,8 @@ const TailorSchema = new mongoose.Schema(
     shopName: { type: String, required: true, unique: true, trim: true },
     email:    { type: String, required: true, unique: true, lowercase: true, trim: true },
     password: { type: String, required: true, minlength: 6 },
+    passwordResetToken:   { type: String },
+    passwordResetExpires: { type: Date },
   },
   { timestamps: true }
 );
