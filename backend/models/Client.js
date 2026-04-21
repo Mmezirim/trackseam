@@ -18,6 +18,8 @@ const ClientSchema = new mongoose.Schema(
     phone:     { type: String, default: "" },
     email:     { type: String, default: "" },
     notes:     { type: String, default: "" },
+    passwordResetToken:   { type: String },
+    passwordResetExpires: { type: Date },
     measurements: [MeasurementSchema],
   },
   { timestamps: true }
