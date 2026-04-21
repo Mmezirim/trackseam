@@ -98,16 +98,15 @@ router.post("/forgot-password", async (req, res) => {
     // Store only the SHA-256 hash — the plaintext never touches the database.
     const hashedToken = crypto.createHash("sha256").update(plainToken).digest("hex");
  
-    tailor.passwordResetToken   = hashedToken;
-    tailor.passwordResetExpires = Date.now() + 60 * 60 * 1000; // expires in 1 hour
-    await tailor.save();
+    await Tailor.findByIdAndUpdate(tailor._id, {
+      passwordResetToken:   hashedToken,
+      passwordResetExpires: Date.now() + 60 * 60 * 1000,
+    });
  
-    // Build the reset URL the frontend will open.
-    //    The frontend reads the ?resetToken= query param and shows the
-    //    ResetPasswordScreen (already integrated in App.jsx).
+    // Build the reset URL
     const resetUrl = `${process.env.CLIENT_URL}?resetToken=${plainToken}`;
  
-    // 4. Send the email via Nodemailer.
+    // Send the email via Nodemailer.
     await sendResetEmail(tailor.email, tailor.shopName, resetUrl);
  
     res.json({ message: "If that email is registered, a reset link has been sent." });
