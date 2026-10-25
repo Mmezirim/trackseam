@@ -73,6 +73,15 @@ jobs:
             CODE_SIGN_STYLE=Automatic \
             CURRENT_PROJECT_VERSION="${{ github.run_number }}"
 
+      # Fails the run early if the app icon didn't make it into the build
+      # (TestFlight then shows a blank white icon).
+      - name: Check app icon is in the build
+        run: |
+          APP="$RUNNER_TEMP/App.xcarchive/Products/Applications/App.app"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIcons" "$APP/Info.plist"
+          xcrun assetutil --info "$APP/Assets.car" | grep -c '"AppIcon"' | xargs -I{} echo "AppIcon renditions in Assets.car: {}"
+          xcrun assetutil --info "$APP/Assets.car" | grep -q '"AppIcon"'
+
       - name: Export and upload to App Store Connect
         env:
           TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
