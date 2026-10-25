@@ -117,9 +117,14 @@ which is exempt, so App Store Connect won't ask on each build.
 
 ## Review notes (paste into App Review Information / Play app access)
 
-Create the demo account first, through the app's Register screen, with a password you
-don't use anywhere else. Add 2–3 sample clients with a measurement each so reviewers see
-real content. Don't put the password in this repo.
+Create or reset the demo account (login, password and 3 sample clients) with:
+
+```
+cd backend
+node scripts/seed-reviewer.js <login> <password>
+```
+
+Re-run it before each review to restore the sample data. Keep the password out of this repo.
 
 > Trackseam is a record book for tailors. Sign in with the demo account below to see sample
 > clients and measurements.
