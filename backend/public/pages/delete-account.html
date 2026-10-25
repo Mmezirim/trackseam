@@ -1,0 +1,20 @@
+<h1>Delete your Trackseam account</h1>
+<p class="meta">Permanent and immediate</p>
+<p>Deleting your account permanently removes:</p>
+<ul>
+  <li>your account (shop name, email address and password);</li>
+  <li>every client you registered, with their contact details and notes;</li>
+  <li>every measurement record.</li>
+</ul>
+<p>Data is removed from our live database immediately; encrypted backups are overwritten within 30 days. PDF files you already exported to your device are not affected. You can also delete your account from inside the app under <strong>Account &rarr; Delete account</strong>.</p>
+<p>Can't sign in? Email <a href="mailto:{{SUPPORT_EMAIL}}">{{SUPPORT_EMAIL}}</a> from the address you registered with and ask us to delete your account.</p>
+
+<form id="form" class="card" novalidate>
+  <label for="email">Account email</label>
+  <input id="email" name="email" type="email" autocomplete="email" required>
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password" autocomplete="current-password" required>
+  <button id="submit" class="danger" type="submit">Permanently delete my account</button>
+  <div id="msg" class="msg" role="status"></div>
+</form>
+<script src="/legal-assets/delete-account.js"></script>

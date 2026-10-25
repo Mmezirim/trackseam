@@ -1,0 +1,58 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model Tailor {
+  id                   String    @id @default(cuid()) @db.VarChar(36)
+  shopName             String    @db.VarChar(120)
+  email                String    @unique @db.VarChar(191)
+  password             String    @db.VarChar(100)
+  passwordResetToken   String?   @db.VarChar(64)
+  passwordResetExpires DateTime?
+  passwordChangedAt    DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+  clients              Client[]
+
+  @@index([passwordResetToken])
+}
+
+model Client {
+  id           String        @id @default(cuid()) @db.VarChar(36)
+  tailorId     String        @db.VarChar(36)
+  tailor       Tailor        @relation(fields: [tailorId], references: [id], onDelete: Cascade)
+  clientId     String        @db.VarChar(20)
+  name         String        @db.VarChar(120)
+  phone        String        @default("") @db.VarChar(40)
+  email        String        @default("") @db.VarChar(191)
+  notes        String        @db.Text
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  measurements Measurement[]
+
+  @@unique([tailorId, clientId])
+  @@index([tailorId, name])
+  @@index([tailorId, createdAt])
+}
+
+model Measurement {
+  id          String   @id @default(cuid()) @db.VarChar(36)
+  clientRefId String   @db.VarChar(36)
+  client      Client   @relation(fields: [clientRefId], references: [id], onDelete: Cascade)
+  outfitType  String   @db.VarChar(60)
+  description String   @db.VarChar(255)
+  // JSON-encoded { fieldName: value }. Stored as text, not a MySQL JSON
+  // column, because MySQL re-sorts JSON object keys and the order of the
+  // fields (Chest, Waist, Shoulder, ...) matters to the tailor.
+  fields      String   @db.Text
+  notes       String   @db.Text
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([clientRefId, createdAt])
+}

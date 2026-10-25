@@ -9,7 +9,7 @@ const transporter = nodemailer.createTransport({
 });  
  
 // Verify the connection configuration once at startup
-transporter.verify((err) => {
+if (process.env.MAIL_USER) transporter.verify((err) => {
   if (err) {
     console.warn("[mailer] SMTP connection failed — emails will not be sent:", err.message);
   } else {
@@ -17,15 +17,20 @@ transporter.verify((err) => {
   }
 });
  
-// Email Helpers  
-async function sendResetEmail(toEmail, shopName, resetUrl) { 
+// shopName is user-supplied, so it must be escaped before going into HTML.
+const escapeHtml = (s) =>
+  String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+// Email Helpers
+async function sendResetEmail(toEmail, rawShopName, resetUrl) {
+  const shopName = escapeHtml(rawShopName);
   const mailOptions = {
     from: `"Trackseam" <${process.env.MAIL_USER}>`,
     to:   toEmail, 
     subject: "Reset your Trackseam password",
  
     // Plain-text fallback for email clients that block HTML
-    text: `Hi ${shopName},\n\nYou requested a password reset for your Trackseam account.\n\nClick the link below to set a new password (valid for 1 hour):\n${resetUrl}\n\nIf you did not request this, you can safely ignore this email — your password will not change.\n\n— The Trackseam Team`,
+    text: `Hi ${rawShopName},\n\nYou requested a password reset for your Trackseam account.\n\nClick the link below to set a new password (valid for 1 hour):\n${resetUrl}\n\nIf you did not request this, you can safely ignore this email — your password will not change.\n\n— The Trackseam Team`,
  
     // HTML version
     html: `

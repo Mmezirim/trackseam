@@ -1,9 +1,46 @@
-import { useState, useEffect, useCallback, createContext, useContext } from "react";
+import { useState, useEffect, useCallback, useRef, createContext, useContext } from "react";
 import { jsPDF } from "jspdf";
+import { Capacitor, SystemBars, SystemBarsStyle } from "@capacitor/core";
+import { App as NativeApp } from "@capacitor/app";
+import { Browser } from "@capacitor/browser";
+import { Filesystem, Directory } from "@capacitor/filesystem";
+import { Share } from "@capacitor/share";
 import Logo from "./assets/trackseamlogo.jpeg"
 
-// CONFIG 
-const API_BASE = import.meta.env.VITE_API_BASE;
+// CONFIG
+const API_BASE  = (import.meta.env.VITE_API_BASE || "https://trackseam.onrender.com/api").replace(/\/+$/, "");
+// Privacy policy, terms, support and account deletion pages (website/ in this repo).
+const SITE_BASE = (import.meta.env.VITE_SITE_BASE || "https://trackseam.com").replace(/\/+$/, "");
+const IS_NATIVE = Capacitor.isNativePlatform();
+const PASSWORD_MIN = 8;
+
+const openLink = (path) => {
+  const url = `${SITE_BASE}${path}`;
+  if (IS_NATIVE) Browser.open({ url });
+  else window.open(url, "_blank", "noopener");
+};
+
+// ANDROID BACK BUTTON — screens and modals register a handler while mounted;
+// the hardware back button runs the most recent one, or leaves the app.
+const backHandlers = [];
+
+function useBackHandler(handler) {
+  const ref = useRef(handler);
+  ref.current = handler;
+  useEffect(() => {
+    const entry = () => ref.current();
+    backHandlers.push(entry);
+    return () => { backHandlers.splice(backHandlers.indexOf(entry), 1); };
+  }, []);
+}
+
+if (IS_NATIVE) {
+  NativeApp.addListener("backButton", () => {
+    const top = backHandlers[backHandlers.length - 1];
+    if (top) top();
+    else NativeApp.exitApp();
+  });
+}
 
 // AUTH CONTEXT
 const AuthContext = createContext(null);
@@ -37,27 +74,44 @@ const OUTFIT_FIELDS = {
 // API
 const getToken = () => localStorage.getItem("tb_token");
 
-const apiFetch = (path, options = {}) => {
+// Fired when a signed-in request comes back 401 (expired or revoked session).
+const UNAUTHORIZED_EVENT = "trackseam:unauthorized";
+
+const apiFetch = async (path, options = {}) => {
   const token = getToken();
-  return fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...options.headers,
-    },
-  }).then(async (r) => {
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.error || "Request failed");
-    return data;
-  });
+  let r;
+  try {
+    r = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...options.headers,
+      },
+    });
+  } catch {
+    throw new Error("Can't reach Trackseam. Check your internet connection and try again.");
+  }
+  // Error pages from proxies or a sleeping host are HTML, not JSON.
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const err = new Error(data.error || (r.status >= 500 ? "Server error. Please try again shortly." : "Request failed"));
+    err.status = r.status;
+    if (r.status === 401 && token) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+    throw err;
+  }
+  return data;
 };
 
 const api = {
   // AUTH
-  register:   (body) => apiFetch("/auth/register", { method: "POST", body: JSON.stringify(body) }),
-  login:      (body) => apiFetch("/auth/login",    { method: "POST", body: JSON.stringify(body) }),
-  me:         ()     => apiFetch("/auth/me"),
+  register:      (body)  => apiFetch("/auth/register",   { method: "POST", body: JSON.stringify(body) }),
+  login:         (body)  => apiFetch("/auth/login",      { method: "POST", body: JSON.stringify(body) }),
+  me:            ()      => apiFetch("/auth/me"),
+  updateMe:      (body)  => apiFetch("/auth/me",         { method: "PATCH",  body: JSON.stringify(body) }),
+  deleteAccount: (body)  => apiFetch("/auth/me",         { method: "DELETE", body: JSON.stringify(body) }),
+  forgotPassword:(body)  => apiFetch("/auth/forgot-password",       { method: "POST", body: JSON.stringify(body) }),
+  resetPassword: (token, body) => apiFetch(`/auth/reset-password/${token}`, { method: "POST", body: JSON.stringify(body) }),
 
   // CLIENTS
   getClients:    ()  => apiFetch("/clients"),
@@ -72,6 +126,19 @@ const api = {
 };
 
 // PDF EXPORT
+// A WebView can't download blobs, so on Android/iOS the PDF is written to the
+// cache directory and handed to the share sheet (save to Files, WhatsApp, print…).
+const savePdf = async (doc, filename) => {
+  if (!IS_NATIVE) return doc.save(filename);
+  const data = doc.output("datauristring").split(",")[1];
+  const { uri } = await Filesystem.writeFile({ path: filename, data, directory: Directory.Cache });
+  try {
+    await Share.share({ title: filename, files: [uri] });
+  } catch (err) {
+    if (!/cancel/i.test(err?.message || "")) throw err;
+  }
+};
+
 const exportMeasurement = (client, measurement, shopName) => {
   const doc = new jsPDF({ unit: "mm", format: "a4" });
   const W = 210, H = 297;
@@ -88,7 +155,6 @@ const exportMeasurement = (client, measurement, shopName) => {
   const setMuted = () => doc.setTextColor(...MUTED);
   const setFaint = () => doc.setTextColor(...FAINT);
 
-  // TRACKSEAM (app branding)
   const drawWatermark = () => {
     doc.saveGraphicsState();
     doc.setGState(new doc.GState({ opacity: 0.07 }));
@@ -133,7 +199,6 @@ const exportMeasurement = (client, measurement, shopName) => {
 
   let y = MT + 8;
 
-  // TITLE
   doc.setFont("helvetica", "bold");
   doc.setFontSize(20);
   setInk();
@@ -151,7 +216,6 @@ const exportMeasurement = (client, measurement, shopName) => {
   doc.line(ML, y, W - MR, y);
   y += 8;
 
-  // CLIENT INFO BLOCK
   const infoRows = [
     ["Client Name", client.name],
     ["Client ID",   client.clientId],
@@ -178,7 +242,6 @@ const exportMeasurement = (client, measurement, shopName) => {
   });
   y += blockH + 8;
 
-  // OUTFIT & DESCRIPTION
   doc.setFont("helvetica", "bold");
   doc.setFontSize(11);
   setInk();
@@ -210,7 +273,6 @@ const exportMeasurement = (client, measurement, shopName) => {
   });
   y += 4;
 
-  // MEASUREMENT TABLE
   doc.setFont("helvetica", "bold");
   doc.setFontSize(11);
   setInk();
@@ -222,7 +284,6 @@ const exportMeasurement = (client, measurement, shopName) => {
   doc.line(ML, y, W - MR, y);
   y += 2;
 
-  // Table header row
   doc.setFillColor(...ACCENT_BG);
   doc.rect(ML, y, CW, 8, "F");
   doc.setFont("helvetica", "bold");
@@ -260,8 +321,8 @@ const exportMeasurement = (client, measurement, shopName) => {
   doc.setLineWidth(0.3);
   doc.line(ML, y, W - MR, y);
 
-  const safeName = `${client.name.replace(/\s+/g, "_")}_${measurement.outfitType}_${measurement._id || generateId()}.pdf`;
-  doc.save(safeName);
+  const baseName = `${client.name}_${measurement.outfitType}_${measurement.id || generateId()}`;
+  return savePdf(doc, `${baseName.replace(/[^\w.-]+/g, "_")}.pdf`);
 };
 
 // SHARED UI COMPONENTS
@@ -283,7 +344,7 @@ function Toast({ msg, onClose }) {
 }
 
 function Modal({ title, onClose, children }) {
-  // Close on Escape key
+  useBackHandler(onClose);
   useEffect(() => {
     const handler = (e) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", handler);
@@ -303,11 +364,163 @@ function Modal({ title, onClose, children }) {
   );
 }
 
-// AUTH SCREENS
+// ─── FORGOT PASSWORD SCREEN ───────────────────────────────────────────────────
 
-function AuthPage({ onAuth }) {
+function ForgotPasswordScreen({ onBack }) {
+  const [email,   setEmail]   = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error,   setError]   = useState("");
+  const [sent,    setSent]    = useState(false);
+
+  useBackHandler(onBack);
+
+  const handleSubmit = async () => {
+    setError("");
+    if (!email.trim()) return setError("Please enter your email address.");
+    setLoading(true);
+    try {
+      await api.forgotPassword({ email: email.trim() });
+      setSent(true);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="auth-page">
+      <div className="auth-card">
+        <div className="auth-brand">
+          <img className="auth-logo" src={Logo} alt="Trackseam Logo" />
+          <span className="brand-name">Trackseam</span>
+          <p className="auth-tagline">Reset your password</p>
+        </div>
+
+        {sent ? (
+          <div className="form-grid">
+            <div className="reset-success-box">
+              <span className="reset-success-icon">✉️</span>
+              <p className="reset-success-text">
+                If that email is registered, a reset link has been sent. Check your inbox and follow the link to set a new password.
+              </p>
+            </div>
+            <button className="btn btn-primary" onClick={onBack}>Back to Sign In</button>
+          </div>
+        ) : (
+          <div className="form-grid">
+            <p className="reset-hint">
+              Enter the email address you registered with and we'll send you a password reset link.
+            </p>
+            <label>Email Address *</label>
+            <input
+              className="input"
+              type="email"
+              placeholder="you@example.com"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
+            />
+            {error && <p className="auth-error">{error}</p>}
+            <button className="btn btn-primary" onClick={handleSubmit} disabled={loading}>
+              {loading ? "Sending..." : "Send Reset Link"}
+            </button>
+          </div>
+        )}
+
+        <p className="auth-switch">
+          <button className="link-btn" onClick={onBack}>← Back to Sign In</button>
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ─── RESET PASSWORD SCREEN ────────────────────────────────────────────────────
+// Rendered when the URL contains ?resetToken=<token>
+// e.g. https://yourdomain.com/?resetToken=abc123...
+
+function ResetPasswordScreen({ resetToken, onAuth }) {
+  const [password,  setPassword]  = useState("");
+  const [confirm,   setConfirm]   = useState("");
+  const [loading,   setLoading]   = useState(false);
+  const [error,     setError]     = useState("");
+  const [done,      setDone]      = useState(false);
+
+  const handleSubmit = async () => {
+    setError("");
+    if (!password) return setError("Please enter a new password.");
+    if (password.length < PASSWORD_MIN) return setError(`Password must be at least ${PASSWORD_MIN} characters.`);
+    if (password !== confirm) return setError("Passwords do not match.");
+
+    setLoading(true);
+    try {
+      const data = await api.resetPassword(resetToken, { password });
+      localStorage.setItem("tb_token", data.token);
+      setDone(true);
+      // Auto-login after a short pause so the user sees the success message
+      setTimeout(() => onAuth(data.tailor), 1800);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="auth-page">
+      <div className="auth-card">
+        <div className="auth-brand">
+          <img className="auth-logo" src={Logo} alt="Trackseam Logo" />
+          <span className="brand-name">Trackseam</span>
+          <p className="auth-tagline">Choose a new password</p>
+        </div>
+
+        {done ? (
+          <div className="form-grid">
+            <div className="reset-success-box">
+              <span className="reset-success-icon">✅</span>
+              <p className="reset-success-text">Password updated! Signing you in…</p>
+            </div>
+          </div>
+        ) : (
+          <div className="form-grid">
+            <label>New Password *</label>
+            <input
+              className="input"
+              type="password"
+              autoComplete="new-password"
+              placeholder={`Min. ${PASSWORD_MIN} characters`}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
+            />
+            <label>Confirm Password *</label>
+            <input
+              className="input"
+              type="password"
+              placeholder="Re-enter your new password"
+              value={confirm}
+              onChange={(e) => setConfirm(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
+            />
+            {error && <p className="auth-error">{error}</p>}
+            <button className="btn btn-primary" onClick={handleSubmit} disabled={loading}>
+              {loading ? "Saving..." : "Set New Password"}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── AUTH PAGE (login + register) ────────────────────────────────────────────
+
+function AuthPage({ onAuth, onForgotPassword }) {
   const [mode, setMode]       = useState("login");
   const [form, setForm]       = useState({ shopName: "", email: "", password: "" });
+  const [agreed, setAgreed]   = useState(false);
   const [error, setError]     = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -316,7 +529,11 @@ function AuthPage({ onAuth }) {
   const handleSubmit = async () => {
     setError("");
     if (!form.email || !form.password) return setError("Email and password are required.");
-    if (mode === "register" && !form.shopName.trim()) return setError("Shop / brand name is required.");
+    if (mode === "register") {
+      if (!form.shopName.trim()) return setError("Shop / brand name is required.");
+      if (form.password.length < PASSWORD_MIN) return setError(`Password must be at least ${PASSWORD_MIN} characters.`);
+      if (!agreed) return setError("Please accept the Terms of Use and Privacy Policy.");
+    }
 
     setLoading(true);
     try {
@@ -342,9 +559,9 @@ function AuthPage({ onAuth }) {
           <img className="auth-logo" src={Logo} alt="Trackseam Logo" />
           <span className="brand-name">Trackseam</span>
           <p className="auth-tagline">
-                  {mode === "login" ? "Sign in to your shop account" : "Create your tailor shop account"}
+            {mode === "login" ? "Sign in to your shop account" : "Create your tailor shop account"}
           </p>
-</div>
+        </div>
 
         <div className="form-grid">
           {mode === "register" && (
@@ -363,6 +580,8 @@ function AuthPage({ onAuth }) {
           <input
             className="input"
             type="email"
+            autoComplete="email"
+            autoCapitalize="none"
             placeholder="you@example.com"
             value={form.email}
             onChange={set("email")}
@@ -372,17 +591,38 @@ function AuthPage({ onAuth }) {
           <input
             className="input"
             type="password"
-            placeholder={mode === "register" ? "Min. 6 characters" : "Your password"}
+            autoComplete={mode === "register" ? "new-password" : "current-password"}
+            placeholder={mode === "register" ? `Min. ${PASSWORD_MIN} characters` : "Your password"}
             value={form.password}
             onChange={set("password")}
             onKeyDown={handleKeyDown}
           />
+
+          {mode === "register" && (
+            <div className="consent">
+              <input id="consent" type="checkbox" checked={agreed} onChange={(e) => setAgreed(e.target.checked)} />
+              <span>
+                <span onClick={() => setAgreed(!agreed)}>I am 18 or older and agree to the </span>
+                <button type="button" className="link-btn" onClick={() => openLink("/terms")}>Terms of Use</button>
+                {" "}and{" "}
+                <button type="button" className="link-btn" onClick={() => openLink("/privacy")}>Privacy Policy</button>.
+              </span>
+            </div>
+          )}
 
           {error && <p className="auth-error">{error}</p>}
 
           <button className="btn btn-primary" onClick={handleSubmit} disabled={loading}>
             {loading ? "Please wait..." : mode === "login" ? "Sign In" : "Create Account"}
           </button>
+
+          {mode === "login" && (
+            <p style={{ textAlign: "center", marginTop: "2px" }}>
+              <button className="link-btn forgot-link" onClick={onForgotPassword}>
+                Forgot your password?
+              </button>
+            </p>
+          )}
         </div>
 
         <p className="auth-switch">
@@ -392,12 +632,117 @@ function AuthPage({ onAuth }) {
             <>Already registered? <button className="link-btn" onClick={() => { setMode("login"); setError(""); }}>Sign in</button></>
           )}
         </p>
+        <LegalLinks />
       </div>
     </div>
   );
 }
 
-// ─── ADD CLIENT FORM ─────────────────────────────────────────────────────────
+function LegalLinks() {
+  return (
+    <p className="legal-links">
+      <button className="link-btn" onClick={() => openLink("/privacy")}>Privacy</button>
+      <span>·</span>
+      <button className="link-btn" onClick={() => openLink("/terms")}>Terms</button>
+      <span>·</span>
+      <button className="link-btn" onClick={() => openLink("/support")}>Support</button>
+    </p>
+  );
+}
+
+// ─── ACCOUNT PANEL ────────────────────────────────────────────────────────────
+
+function AccountPanel({ onUpdated, onLogout, onDeleted, onToast }) {
+  const { tailor }                  = useAuth();
+  const [shopName, setShopName]     = useState(tailor.shopName);
+  const [saving, setSaving]         = useState(false);
+  const [deleting, setDeleting]     = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [password, setPassword]     = useState("");
+  const [error, setError]           = useState("");
+
+  const saveShopName = async () => {
+    setError("");
+    if (!shopName.trim()) return setError("Shop name is required.");
+    setSaving(true);
+    try {
+      const data = await api.updateMe({ shopName: shopName.trim() });
+      onUpdated(data.tailor);
+      onToast("Shop name updated.");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const deleteAccount = async () => {
+    setError("");
+    if (!password) return setError("Enter your password to confirm.");
+    setDeleting(true);
+    try {
+      await api.deleteAccount({ password });
+      onDeleted();
+    } catch (err) {
+      setError(err.message);
+      setDeleting(false);
+    }
+  };
+
+  return (
+    <div className="form-grid">
+      <label>Signed in as</label>
+      <p className="account-email">{tailor.email}</p>
+
+      <label>Shop / Brand Name</label>
+      <div className="inline-row">
+        <input className="input" value={shopName} onChange={(e) => setShopName(e.target.value)} maxLength={120} />
+        <button className="btn btn-ghost" onClick={saveShopName} disabled={saving || shopName.trim() === tailor.shopName}>
+          {saving ? "Saving..." : "Save"}
+        </button>
+      </div>
+
+      <label>Legal & Help</label>
+      <div className="account-links">
+        <button className="link-btn" onClick={() => openLink("/privacy")}>Privacy Policy</button>
+        <button className="link-btn" onClick={() => openLink("/terms")}>Terms of Use</button>
+        <button className="link-btn" onClick={() => openLink("/support")}>Support</button>
+      </div>
+
+      {error && <p className="auth-error">{error}</p>}
+
+      <button className="btn btn-ghost" onClick={onLogout}>Sign out</button>
+
+      <div className="danger-zone">
+        {!confirming ? (
+          <button className="btn btn-danger-ghost" onClick={() => setConfirming(true)}>Delete account</button>
+        ) : (
+          <>
+            <p className="danger-text">
+              This permanently deletes your account, all your clients and all their measurements. It cannot be undone.
+            </p>
+            <input
+              className="input"
+              type="password"
+              autoComplete="current-password"
+              placeholder="Enter your password to confirm"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+            <div className="form-actions">
+              <button className="btn btn-ghost" onClick={() => { setConfirming(false); setPassword(""); setError(""); }}>Cancel</button>
+              <button className="btn btn-danger" onClick={deleteAccount} disabled={deleting}>
+                {deleting ? "Deleting..." : "Delete permanently"}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── ADD CLIENT FORM ──────────────────────────────────────────────────────────
 
 function AddClientForm({ onSave, onClose }) {
   const [form, setForm]       = useState({ name: "", phone: "", email: "", notes: "" });
@@ -471,7 +816,7 @@ function AddMeasurementForm({ client, onSave, onClose }) {
     setError("");
     setLoading(true);
     try {
-      const res = await api.addMeasurement(client._id, { outfitType, description, notes, fields });
+      const res = await api.addMeasurement(client.id, { outfitType, description, notes, fields });
       onSave(res);
     } catch (err) {
       setError(err.message);
@@ -500,7 +845,9 @@ function AddMeasurementForm({ client, onSave, onClose }) {
             <input
               className="input meas-input"
               type="number"
+              inputMode="decimal"
               min="0"
+              step="any"
               placeholder="0"
               value={fields[f] || ""}
               onChange={(e) => setFields({ ...fields, [f]: e.target.value })}
@@ -538,13 +885,16 @@ function ClientDetail({ client, onBack, onToast }) {
   const [loading, setLoading]           = useState(true);
   const [showAdd, setShowAdd]           = useState(false);
   const [expanded, setExpanded]         = useState(null);
+  const [loadError, setLoadError]       = useState("");
+
+  useBackHandler(onBack);
 
   useEffect(() => {
-    api.getMeasurements(client._id).then((data) => {
-      setMeasurements(Array.isArray(data) ? data : []);
-      setLoading(false);
-    }).catch(() => setLoading(false));
-  }, [client._id]);
+    api.getMeasurements(client.id)
+      .then((data) => setMeasurements(Array.isArray(data) ? data : []))
+      .catch((err) => setLoadError(err.message))
+      .finally(() => setLoading(false));
+  }, [client.id]);
 
   const handleAdd = (m) => {
     setMeasurements((prev) => [m, ...prev]);
@@ -554,9 +904,21 @@ function ClientDetail({ client, onBack, onToast }) {
 
   const handleDelete = async (measId) => {
     if (!window.confirm("Delete this measurement?")) return;
-    await api.deleteMeasurement(client._id, measId);
-    setMeasurements((prev) => prev.filter((m) => m._id !== measId));
-    onToast("Measurement deleted.");
+    try {
+      await api.deleteMeasurement(client.id, measId);
+      setMeasurements((prev) => prev.filter((m) => m.id !== measId));
+      onToast("Measurement deleted.");
+    } catch (err) {
+      onToast(err.message);
+    }
+  };
+
+  const handleExport = async (m) => {
+    try {
+      await exportMeasurement(client, m, tailor?.shopName);
+    } catch (err) {
+      onToast(`Couldn't export PDF: ${err.message}`);
+    }
   };
 
   return (
@@ -584,6 +946,8 @@ function ClientDetail({ client, onBack, onToast }) {
 
       {loading ? (
         <Spinner />
+      ) : loadError ? (
+        <div className="empty-state"><p>{loadError}</p></div>
       ) : measurements.length === 0 ? (
         <div className="empty-state">
           <div className="empty-icon">📐</div>
@@ -593,8 +957,8 @@ function ClientDetail({ client, onBack, onToast }) {
       ) : (
         <div className="meas-list">
           {measurements.map((m) => (
-            <div key={m._id} className="meas-card">
-              <div className="meas-card-header" onClick={() => setExpanded(expanded === m._id ? null : m._id)}>
+            <div key={m.id} className="meas-card">
+              <div className="meas-card-header" onClick={() => setExpanded(expanded === m.id ? null : m.id)}>
                 <div>
                   <span className="outfit-badge">{m.outfitType}</span>
                   <span className="meas-desc">{m.description}</span>
@@ -604,17 +968,17 @@ function ClientDetail({ client, onBack, onToast }) {
                   <button
                     className="icon-btn action-btn"
                     title="Export PDF"
-                    onClick={(e) => { e.stopPropagation(); exportMeasurement(client, m, tailor?.shopName); }}
+                    onClick={(e) => { e.stopPropagation(); handleExport(m); }}
                   >↓ PDF</button>
                   <button
                     className="icon-btn action-btn danger"
                     title="Delete"
-                    onClick={(e) => { e.stopPropagation(); handleDelete(m._id); }}
+                    onClick={(e) => { e.stopPropagation(); handleDelete(m.id); }}
                   >✕</button>
-                  <span className="chevron">{expanded === m._id ? "▲" : "▼"}</span>
+                  <span className="chevron">{expanded === m.id ? "▲" : "▼"}</span>
                 </div>
               </div>
-              {expanded === m._id && (
+              {expanded === m.id && (
                 <div className="meas-card-body">
                   <div className="meas-fields-grid">
                     {Object.entries(m.fields || {}).map(([k, v]) => (
@@ -642,16 +1006,24 @@ function ClientList({ onSelect, onToast }) {
   const [search,  setSearch]  = useState("");
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
+  const [loadError, setLoadError] = useState("");
+  const latestRequest = useRef(0);
 
   const fetchClients = useCallback(async () => {
+    // Ignore responses to searches the user has already typed past.
+    const requestId = ++latestRequest.current;
     setLoading(true);
     try {
       const data = search.trim() ? await api.searchClients(search) : await api.getClients();
+      if (requestId !== latestRequest.current) return;
       setClients(Array.isArray(data) ? data : []);
-    } catch {
+      setLoadError("");
+    } catch (err) {
+      if (requestId !== latestRequest.current) return;
       setClients([]);
+      setLoadError(err.message);
     } finally {
-      setLoading(false);
+      if (requestId === latestRequest.current) setLoading(false);
     }
   }, [search]);
 
@@ -669,9 +1041,13 @@ function ClientList({ onSelect, onToast }) {
   const handleDelete = async (e, id, name) => {
     e.stopPropagation();
     if (!window.confirm(`Delete ${name} and all their measurements?`)) return;
-    await api.deleteClient(id);
-    setClients((prev) => prev.filter((c) => c._id !== id));
-    onToast("Client deleted.");
+    try {
+      await api.deleteClient(id);
+      setClients((prev) => prev.filter((c) => c.id !== id));
+      onToast("Client deleted.");
+    } catch (err) {
+      onToast(err.message);
+    }
   };
 
   return (
@@ -694,6 +1070,11 @@ function ClientList({ onSelect, onToast }) {
 
       {loading ? (
         <Spinner />
+      ) : loadError ? (
+        <div className="empty-state">
+          <p>{loadError}</p>
+          <button className="btn btn-ghost" onClick={fetchClients}>Try again</button>
+        </div>
       ) : clients.length === 0 ? (
         <div className="empty-state">
           <div className="empty-icon">🧵</div>
@@ -709,13 +1090,13 @@ function ClientList({ onSelect, onToast }) {
             <span></span>
           </div>
           {clients.map((c) => (
-            <div key={c._id} className="table-row" onClick={() => onSelect(c)}>
+            <div key={c.id} className="table-row" onClick={() => onSelect(c)}>
               <span className="client-name-cell">{c.name}</span>
               <span className="mono">{c.clientId}</span>
               <span>{c.phone || "—"}</span>
               <span>{formatDate(c.createdAt)}</span>
               <span>
-                <button className="icon-btn danger" title="Delete client" onClick={(e) => handleDelete(e, c._id, c.name)}>✕</button>
+                <button className="icon-btn danger" title="Delete client" onClick={(e) => handleDelete(e, c.id, c.name)}>✕</button>
               </span>
             </div>
           ))}
@@ -725,36 +1106,75 @@ function ClientList({ onSelect, onToast }) {
   );
 }
 
-// APP ROOT
+// ─── APP ROOT ─────────────────────────────────────────────────────────────────
 
 export default function App() {
   const [tailor,         setTailor]         = useState(null);
   const [authChecked,    setAuthChecked]     = useState(false);
+  const [authScreen,     setAuthScreen]      = useState("login"); // "login" | "forgot" | "reset"
   const [view,           setView]           = useState("clients");
   const [selectedClient, setSelectedClient] = useState(null);
+  const [showAccount,    setShowAccount]    = useState(false);
   const [toast,          setToast]          = useState(null);
+
+  // Detect ?resetToken=<token> in the URL (web only; emails now link to the
+  // server-hosted reset page, but older links point here).
+  const resetToken = new URLSearchParams(window.location.search).get("resetToken");
 
   // ON MOUNT: CHECK AUTH
   useEffect(() => {
+    // If a reset token is present, skip auth check and go straight to reset screen
+    if (resetToken) { setAuthChecked(true); return; }
+
     const token = localStorage.getItem("tb_token");
     if (!token) { setAuthChecked(true); return; }
 
     api.me()
       .then((data) => setTailor(data.tailor))
-      .catch(() => localStorage.removeItem("tb_token"))
+      .catch((err) => {
+        // Keep the session when offline; only a rejected token signs you out.
+        if (err.status === 401) localStorage.removeItem("tb_token");
+      })
       .finally(() => setAuthChecked(true));
-  }, []);
+  }, []);  // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleAuth  = (t)  => setTailor(t);
-  const handleLogout = ()  => {
+  const handleLogout = useCallback(() => {
     localStorage.removeItem("tb_token");
     setTailor(null);
+    setAuthScreen("login");
     setView("clients");
     setSelectedClient(null);
+    setShowAccount(false);
+  }, []);
+
+  // Any request rejected with 401 means the session expired or was revoked.
+  useEffect(() => {
+    window.addEventListener(UNAUTHORIZED_EVENT, handleLogout);
+    return () => window.removeEventListener(UNAUTHORIZED_EVENT, handleLogout);
+  }, [handleLogout]);
+
+  // Light status-bar icons over the dark app header; dark icons on the light sign-in screens.
+  useEffect(() => {
+    if (!IS_NATIVE) return;
+    SystemBars.setStyle({ style: tailor ? SystemBarsStyle.Dark : SystemBarsStyle.Light }).catch(() => {});
+  }, [tailor]);
+
+  const handleAuth  = (t) => {
+    setTailor(t);
+    // Remove the reset token query param from the URL if present
+    if (resetToken) window.history.replaceState({}, "", window.location.pathname);
   };
 
-  const showToast   = useCallback((msg) => setToast(msg), []);
+  const showToast    = useCallback((msg) => setToast({ msg, id: Date.now() }), []);
+  const hideToast    = useCallback(() => setToast(null), []);
   const selectClient = (c) => { setSelectedClient(c); setView("detail"); };
+
+  const handleDeleted = () => {
+    handleLogout();
+    showToast("Your account has been deleted.");
+  };
+
+  const toastEl = toast && <Toast key={toast.id} msg={toast.msg} onClose={hideToast} />;
 
   if (!authChecked) return (
     <>
@@ -763,13 +1183,33 @@ export default function App() {
     </>
   );
 
-  if (!tailor) return (
-    <>
-      <style>{CSS}</style>
-      <AuthPage onAuth={handleAuth} />
-    </>
-  );
+  // ── Unauthenticated screens ──────────────────────────────────────────────
+  if (!tailor) {
+    // Password reset link from email
+    if (resetToken) return (
+      <>
+        <style>{CSS}</style>
+        <ResetPasswordScreen resetToken={resetToken} onAuth={handleAuth} />
+      </>
+    );
 
+    if (authScreen === "forgot") return (
+      <>
+        <style>{CSS}</style>
+        <ForgotPasswordScreen onBack={() => setAuthScreen("login")} />
+      </>
+    );
+
+    return (
+      <>
+        <style>{CSS}</style>
+        <AuthPage onAuth={handleAuth} onForgotPassword={() => setAuthScreen("forgot")} />
+        {toastEl}
+      </>
+    );
+  }
+
+  // ── Authenticated app ────────────────────────────────────────────────────
   return (
     <AuthContext.Provider value={{ tailor }}>
       <style>{CSS}</style>
@@ -784,9 +1224,20 @@ export default function App() {
               <span className="header-shop-name">{tailor.shopName}</span>
               <span className="header-tagline">Client Measurement Records</span>
             </div>
-            <button className="logout-btn" onClick={handleLogout} title="Sign out">Sign out</button>
+            <button className="logout-btn" onClick={() => setShowAccount(true)} title="Account">Account</button>
           </div>
         </header>
+
+        {showAccount && (
+          <Modal title="Account" onClose={() => setShowAccount(false)}>
+            <AccountPanel
+              onUpdated={setTailor}
+              onLogout={handleLogout}
+              onDeleted={handleDeleted}
+              onToast={showToast}
+            />
+          </Modal>
+        )}
 
         <main className="main">
           <div className="container">
@@ -807,7 +1258,7 @@ export default function App() {
           </div>
         </main>
 
-        {toast && <Toast msg={toast} onClose={() => setToast(null)} />}
+        {toastEl}
       </div>
     </AuthContext.Provider>
   );
@@ -815,7 +1266,6 @@ export default function App() {
 
 // STYLES
 const CSS = `
-  @import url('https://fonts.googleapis.com/css2?family=EB+Garamond:wght@400;500;600&family=DM+Mono:wght@400;500&display=swap');
 
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -838,13 +1288,13 @@ const CSS = `
     --shadow-lg:    0 4px 16px rgba(0,0,0,0.10);
   }
 
-  body { background: var(--bg); color: var(--text); font-family: var(--serif); font-size: 16px; line-height: 1.6; }
-  .app { min-height: 100vh; display: flex; flex-direction: column; }
+  body { background: var(--bg); color: var(--text); font-family: var(--serif); font-size: 16px; line-height: 1.6; -webkit-tap-highlight-color: transparent; overscroll-behavior-y: none; }
+  .app { min-height: 100vh; display: flex; flex-direction: column; padding-bottom: env(safe-area-inset-bottom, 0px); }
 
   /* ── AUTH ── */
-  .auth-page { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; background: var(--bg); }
+  .auth-page { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: calc(24px + env(safe-area-inset-top, 0px)) 24px calc(24px + env(safe-area-inset-bottom, 0px)); background: var(--bg); }
   .auth-card { width: 100%; max-width: 420px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 36px 32px; box-shadow: var(--shadow-lg); }
-    .auth-brand {
+  .auth-brand {
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -854,15 +1304,13 @@ const CSS = `
   .auth-logo {
     width: 100px;
     height: 60px;
-    // margin-bottom: -145px;
-    // margin-top: -80px;
     transition: transform 0.3s ease, opacity 0.3s ease;
   }
   .auth-logo:hover {
     transform: scale(1.05);
     opacity: 0.85;
   }
-    .auth-brand .brand-name {
+  .auth-brand .brand-name {
     font-family: var(--serif);
     font-size: 26px;
     font-weight: 600;
@@ -870,75 +1318,81 @@ const CSS = `
     color: var(--text);
     line-height: 1;
   }
-
   .auth-tagline { font-family: var(--mono); font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 28px; margin: auto;}
   .auth-error { font-family: var(--mono); font-size: 12px; color: var(--danger); background: var(--danger-light); padding: 8px 12px; border-radius: var(--radius); }
   .auth-switch { margin-top: 20px; font-size: 14px; color: var(--text-muted); text-align: center; }
   .link-btn { background: none; border: none; cursor: pointer; font-family: var(--serif); font-size: 14px; color: var(--text); text-decoration: underline; padding: 0; }
+  .forgot-link { font-family: var(--mono); font-size: 12px; color: var(--text-muted); text-decoration: none; opacity: 0.75; transition: opacity 0.15s; }
+  .forgot-link:hover { opacity: 1; text-decoration: underline; }
 
+  /* ── RESET PASSWORD UI ── */
+  .reset-hint { font-size: 14px; color: var(--text-muted); margin-bottom: 4px; line-height: 1.5; }
+  .reset-success-box { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 20px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); text-align: center; margin-bottom: 8px; }
+  .reset-success-icon { font-size: 32px; }
+  .reset-success-text { font-size: 14px; color: var(--text-muted); line-height: 1.6; }
 
   /* ── HEADER ── */
-  .header { background: var(--text); color: var(--accent-fg); border-bottom: 2px solid var(--text); }
-.header-inner { 
-  max-width: 960px; 
-  margin: 0 auto; 
-  padding: 12px 24px; 
-  display: grid; 
-  grid-template-columns: 1fr auto; 
-  grid-template-rows: auto auto; 
-  align-items: center; 
-  gap: 0 16px; 
-}
-.brand { 
-  display: flex; 
-  align-items: center; 
-  gap: 10px; 
-  grid-column: 1; 
-  grid-row: 1; 
-}
+  .header { background: var(--text); color: var(--accent-fg); border-bottom: 2px solid var(--text); padding-top: env(safe-area-inset-top, 0px); position: sticky; top: 0; z-index: 50; }
+  .header-inner { 
+    max-width: 960px; 
+    margin: 0 auto; 
+    padding: 12px 24px; 
+    display: grid; 
+    grid-template-columns: 1fr auto; 
+    grid-template-rows: auto auto; 
+    align-items: center; 
+    gap: 0 16px; 
+  }
+  .brand { 
+    display: flex; 
+    align-items: center; 
+    gap: 10px; 
+    grid-column: 1; 
+    grid-row: 1; 
+  }
   .brand-mark { font-size: 18px; opacity: 0.7; }
   .brand-name { font-family: var(--serif); font-size: 22px; font-weight: 600; letter-spacing: 0.02em; }
   .header-shop { 
-  display: flex; 
-  flex-direction: row; 
-  align-items: center; 
-  gap: 8px; 
-  grid-column: 1; 
-  grid-row: 2; 
-  padding-left: 28px; 
-}
-.header-shop-name { 
-  font-family: var(--serif); 
-  font-size: 13px; 
-  font-weight: 500; 
-  opacity: 0.75; 
-}
-.header-tagline { 
-  font-family: var(--mono); 
-  font-size: 10px; 
-  letter-spacing: 0.08em; 
-  text-transform: uppercase; 
-  opacity: 0.4; 
-}
+    display: flex; 
+    flex-direction: row; 
+    align-items: center; 
+    gap: 8px; 
+    grid-column: 1; 
+    grid-row: 2; 
+    padding-left: 28px; 
+  }
+  .header-shop-name { 
+    font-family: var(--serif); 
+    font-size: 13px; 
+    font-weight: 500; 
+    opacity: 0.75; 
+  }
+  .header-tagline { 
+    font-family: var(--mono); 
+    font-size: 10px; 
+    letter-spacing: 0.08em; 
+    text-transform: uppercase; 
+    opacity: 0.4; 
+  }
   .header-shop-name { font-family: var(--serif); font-size: 15px; font-weight: 500; opacity: 0.9; }
   .header-tagline { font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.4; }
   .logout-btn { 
-  grid-column: 2; 
-  grid-row: 1; 
-  background: none; 
-  border: 1px solid rgba(250,250,248,0.25); 
-  color: var(--accent-fg); 
-  padding: 6px 14px; 
-  border-radius: var(--radius); 
-  font-family: var(--mono); 
-  font-size: 11px; 
-  letter-spacing: 0.06em; 
-  text-transform: uppercase; 
-  cursor: pointer; 
-  opacity: 0.7; 
-  transition: opacity 0.15s; 
-  align-self: center;
-}
+    grid-column: 2; 
+    grid-row: 1; 
+    background: none; 
+    border: 1px solid rgba(250,250,248,0.25); 
+    color: var(--accent-fg); 
+    padding: 6px 14px; 
+    border-radius: var(--radius); 
+    font-family: var(--mono); 
+    font-size: 11px; 
+    letter-spacing: 0.06em; 
+    text-transform: uppercase; 
+    cursor: pointer; 
+    opacity: 0.7; 
+    transition: opacity 0.15s; 
+    align-self: center;
+  }
   .logout-btn:hover { opacity: 1; }
 
   /* ── MAIN ── */
@@ -952,7 +1406,7 @@ const CSS = `
   .search-input { flex: 1; }
 
   /* ── INPUTS ── */
-  .input { width: 100%; padding: 9px 12px; border: 1px solid var(--border); border-radius: var(--radius); font-family: var(--serif); font-size: 15px; background: var(--surface); color: var(--text); outline: none; transition: border 0.15s; }
+  .input { width: 100%; padding: 9px 12px; border: 1px solid var(--border); border-radius: var(--radius); font-family: var(--serif); font-size: 16px; background: var(--surface); color: var(--text); outline: none; transition: border 0.15s; }
   .input:focus { border-color: var(--text); }
   .textarea { resize: vertical; min-height: 72px; }
   .meas-input { width: 80px; text-align: center; }
@@ -1020,7 +1474,7 @@ const CSS = `
   .custom-add { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 4px; }
 
   /* ── MODAL ── */
-  .overlay { position: fixed; inset: 0; background: rgba(26,25,22,0.55); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 20px; }
+  .overlay { position: fixed; inset: 0; background: rgba(26,25,22,0.55); display: flex; align-items: center; justify-content: center; z-index: 100; padding: calc(20px + env(safe-area-inset-top, 0px)) 20px calc(20px + env(safe-area-inset-bottom, 0px)); }
   .modal { background: var(--surface); border-radius: var(--radius); width: 100%; max-width: 520px; max-height: 88vh; overflow-y: auto; box-shadow: var(--shadow-lg); }
   .modal-header { display: flex; justify-content: space-between; align-items: center; padding: 18px 20px; border-bottom: 1px solid var(--border); }
   .modal-title { font-family: var(--serif); font-size: 18px; font-weight: 500; }
@@ -1031,7 +1485,7 @@ const CSS = `
   @keyframes spin { to { transform: rotate(360deg); } }
 
   /* ── TOAST ── */
-  .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--accent-fg); padding: 10px 20px; border-radius: var(--radius); font-family: var(--mono); font-size: 13px; z-index: 200; box-shadow: var(--shadow-lg); animation: fadeUp 0.2s ease; }
+  .toast { position: fixed; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); max-width: calc(100% - 32px); left: 50%; transform: translateX(-50%); background: var(--text); color: var(--accent-fg); padding: 10px 20px; border-radius: var(--radius); font-family: var(--mono); font-size: 13px; z-index: 200; box-shadow: var(--shadow-lg); animation: fadeUp 0.2s ease; }
   @keyframes fadeUp { from { opacity: 0; transform: translateX(-50%) translateY(8px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
 
   /* ── EMPTY ── */
@@ -1039,17 +1493,34 @@ const CSS = `
   .empty-icon { font-size: 40px; margin-bottom: 12px; opacity: 0.5; }
   .empty-state p { margin-bottom: 20px; font-size: 16px; }
 
+  /* ── CONSENT / LEGAL ── */
+  .consent { display: flex; align-items: flex-start; gap: 10px; font-size: 14px; color: var(--text-muted); line-height: 1.5; margin-top: 4px; }
+  .consent input { width: 18px; height: 18px; margin-top: 2px; flex-shrink: 0; accent-color: var(--text); }
+  .legal-links { display: flex; justify-content: center; gap: 8px; margin-top: 16px; font-size: 12px; color: var(--text-faint); }
+  .legal-links .link-btn { font-size: 12px; color: var(--text-faint); text-decoration: none; }
+
+  /* ── ACCOUNT ── */
+  .account-email { font-size: 15px; word-break: break-all; }
+  .inline-row { display: flex; gap: 8px; }
+  .account-links { display: flex; flex-wrap: wrap; gap: 16px; }
+  .danger-zone { margin-top: 12px; padding-top: 14px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 10px; }
+  .danger-text { font-size: 14px; color: var(--danger); }
+  .btn-danger { background: var(--danger); color: #fff; border-color: var(--danger); }
+  .btn-danger:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-danger-ghost { background: transparent; color: var(--danger); border-color: var(--border); }
+  .btn-danger-ghost:hover { background: var(--danger-light); }
+
   /* ── RESPONSIVE ── */
-@media (max-width: 640px) {
-  .table-header, .table-row { grid-template-columns: 1.5fr 1fr 40px; }
-  .table-header span:nth-child(3), .table-row span:nth-child(3),
-  .table-header span:nth-child(4), .table-row span:nth-child(4) { display: none; }
-  .detail-header { flex-direction: column; gap: 12px; }
-  .btn-primary { margin-left: 0 !important; }
-  .auth-card { padding: 28px 20px; }
-  .auth-logo { width: 56px; height: 40px; }
-  .header-inner { padding: 10px 16px; }
-  .header-shop { padding-left: 22px; }
-  .header-tagline { font-size: 8px }
-}
+  @media (max-width: 640px) {
+    .table-header, .table-row { grid-template-columns: 1.5fr 1fr 40px; }
+    .table-header span:nth-child(3), .table-row span:nth-child(3),
+    .table-header span:nth-child(4), .table-row span:nth-child(4) { display: none; }
+    .detail-header { flex-direction: column; gap: 12px; }
+    .btn-primary { margin-left: 0 !important; }
+    .auth-card { padding: 28px 20px; }
+    .auth-logo { width: 56px; height: 40px; }
+    .header-inner { padding: 10px 16px; }
+    .header-shop { padding-left: 22px; }
+    .header-tagline { font-size: 8px }
+  }
 `;

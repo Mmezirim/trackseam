@@ -1,158 +1,205 @@
-const router  = require("express").Router();
-const jwt     = require("jsonwebtoken");
-const crypto  = require("crypto");
-const Tailor  = require("../models/Tailor");
-const auth    = require("../middleware/auth");
+const router    = require("express").Router();
+const jwt       = require("jsonwebtoken");
+const crypto    = require("crypto");
+const bcrypt    = require("bcryptjs");
+const rateLimit = require("express-rate-limit");
+const prisma    = require("../lib/prisma");
+const auth      = require("../middleware/auth");
+const serialize = require("../lib/serialize");
+const { str, isEmail, passwordProblem } = require("../lib/validate");
 const { sendResetEmail } = require("../utils/mailer");
+
+const BCRYPT_ROUNDS = 12;
 
 const signToken = (id) =>
   jwt.sign({ id }, process.env.JWT_SECRET, {
     expiresIn: process.env.JWT_EXPIRES_IN || "7d",
   });
 
+const hashResetToken = (plain) => crypto.createHash("sha256").update(plain).digest("hex");
+
+// Brute-force protection for endpoints that take a password or send email.
+const credentialLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: { error: "Too many attempts. Please wait a few minutes and try again." },
+});
+
+const emailLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 5,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: { error: "Too many reset requests. Please try again later." },
+});
+
 // POST /api/auth/register
-router.post("/register", async (req, res) => {
+router.post("/register", credentialLimiter, async (req, res, next) => {
   try {
-    const { shopName, email, password } = req.body;
+    const shopName = str(req.body.shopName);
+    const email    = str(req.body.email).toLowerCase();
+    const { password } = req.body;
 
-    if (!shopName?.trim() || !email?.trim() || !password)
-      return res.status(400).json({ error: "shopName, email and password are required." });
+    if (!shopName || !email || !password)
+      return res.status(400).json({ error: "Shop name, email and password are required." });
+    if (shopName.length > 120)
+      return res.status(400).json({ error: "Shop name must be 120 characters or fewer." });
+    if (!isEmail(email))
+      return res.status(400).json({ error: "Please enter a valid email address." });
 
-    if (password.length < 6)
-      return res.status(400).json({ error: "Password must be at least 6 characters." });
+    const pwError = passwordProblem(password);
+    if (pwError) return res.status(400).json({ error: pwError });
 
-    const exists = await Tailor.findOne({ email: email.toLowerCase() });
+    const exists = await prisma.tailor.findUnique({ where: { email } });
     if (exists)
       return res.status(409).json({ error: "An account with this email already exists." });
 
-    const tailor = await Tailor.create({ shopName: shopName.trim(), email, password });
-    const token  = signToken(tailor._id);
+    const tailor = await prisma.tailor.create({
+      data: { shopName, email, password: await bcrypt.hash(password, BCRYPT_ROUNDS) },
+    });
 
-    res.status(201).json({ token, tailor });
+    res.status(201).json({ token: signToken(tailor.id), tailor: serialize.tailor(tailor) });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    if (err.code === "P2002")
+      return res.status(409).json({ error: "An account with this email already exists." });
+    next(err);
   }
 });
 
 // POST /api/auth/login
-router.post("/login", async (req, res) => {
+router.post("/login", credentialLimiter, async (req, res, next) => {
   try {
-    const { email, password } = req.body;
+    const email = str(req.body.email).toLowerCase();
+    const { password } = req.body;
 
-    if (!email || !password)
+    if (!email || typeof password !== "string" || !password)
       return res.status(400).json({ error: "Email and password are required." });
 
-    const tailor = await Tailor.findOne({ email: email.toLowerCase() });
-    if (!tailor)
-      return res.status(401).json({ error: "Invalid email or password." });
-
-    const valid = await tailor.comparePassword(password);
+    const tailor = await prisma.tailor.findUnique({ where: { email } });
+    const valid  = tailor && (await bcrypt.compare(password, tailor.password));
     if (!valid)
       return res.status(401).json({ error: "Invalid email or password." });
 
-    const token = signToken(tailor._id);
-    res.json({ token, tailor });
+    res.json({ token: signToken(tailor.id), tailor: serialize.tailor(tailor) });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 
 // GET /api/auth/me
 router.get("/me", auth, (req, res) => {
-  res.json({ tailor: req.tailor });
+  res.json({ tailor: serialize.tailor(req.tailor) });
 });
 
 // PATCH /api/auth/me
-router.patch("/me", auth, async (req, res) => {
+router.patch("/me", auth, async (req, res, next) => {
   try {
-    const { shopName } = req.body;
-    if (!shopName?.trim())
-      return res.status(400).json({ error: "shopName is required." });
+    const shopName = str(req.body.shopName);
+    if (!shopName)
+      return res.status(400).json({ error: "Shop name is required." });
+    if (shopName.length > 120)
+      return res.status(400).json({ error: "Shop name must be 120 characters or fewer." });
 
-    req.tailor.shopName = shopName.trim();
-    await req.tailor.save();
-    res.json({ tailor: req.tailor });
+    const tailor = await prisma.tailor.update({
+      where: { id: req.tailor.id },
+      data:  { shopName },
+    });
+    res.json({ tailor: serialize.tailor(tailor) });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 
-//FORGOT PASSWORD
-router.post("/forgot-password", async (req, res) => {
+// DELETE /api/auth/me — permanently deletes the account, its clients and
+// their measurements. Required by the App Store and Google Play.
+router.delete("/me", credentialLimiter, auth, async (req, res, next) => {
   try {
-    const { email } = req.body;
- 
-    if (!email?.trim())
+    const { password } = req.body || {};
+    const valid = typeof password === "string" && (await bcrypt.compare(password, req.tailor.password));
+    // 403, not 401: the session is fine, only the confirmation failed.
+    if (!valid)
+      return res.status(403).json({ error: "Password is incorrect." });
+
+    // Client and Measurement rows go with it via ON DELETE CASCADE.
+    await prisma.tailor.delete({ where: { id: req.tailor.id } });
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/auth/forgot-password
+router.post("/forgot-password", emailLimiter, async (req, res) => {
+  const generic = { message: "If that email is registered, a reset link has been sent." };
+  try {
+    const email = str(req.body.email).toLowerCase();
+    if (!email)
       return res.status(400).json({ error: "Email address is required." });
- 
-    const tailor = await Tailor.findOne({ email: email.toLowerCase() });
- 
-    // Always return the same message whether or not the email exists,
-    // so attackers cannot enumerate registered accounts.
-    if (!tailor)
-      return res.json({ message: "If that email is registered, a reset link has been sent." });
- 
-    // Generate a random 32-byte plaintext token.
-    const plainToken  = crypto.randomBytes(32).toString("hex");
- 
-    // Store only the SHA-256 hash — the plaintext never touches the database.
-    const hashedToken = crypto.createHash("sha256").update(plainToken).digest("hex");
- 
-    await Tailor.findByIdAndUpdate(tailor._id, {
-      passwordResetToken:   hashedToken,
-      passwordResetExpires: Date.now() + 60 * 60 * 1000,
+
+    const tailor = await prisma.tailor.findUnique({ where: { email } });
+
+    // Same answer whether or not the email exists, so accounts can't be enumerated.
+    if (!tailor) return res.json(generic);
+
+    // Only the SHA-256 hash is stored; the plaintext token exists only in the email.
+    const plainToken = crypto.randomBytes(32).toString("hex");
+
+    await prisma.tailor.update({
+      where: { id: tailor.id },
+      data: {
+        passwordResetToken:   hashResetToken(plainToken),
+        passwordResetExpires: new Date(Date.now() + 60 * 60 * 1000),
+      },
     });
- 
-    // Build the reset URL
-    const resetUrl = `${process.env.CLIENT_URL}?resetToken=${plainToken}`;
- 
-    // Send the email via Nodemailer.
+
+    const base     = (process.env.PUBLIC_URL || `${req.protocol}://${req.get("host")}`).replace(/\/+$/, "");
+    const resetUrl = `${base}/reset-password?token=${plainToken}`;
+
     await sendResetEmail(tailor.email, tailor.shopName, resetUrl);
- 
-    res.json({ message: "If that email is registered, a reset link has been sent." });
- 
+
+    res.json(generic);
   } catch (err) {
     console.error("[forgot-password]", err.message);
     res.status(500).json({ error: "Could not send reset email. Please try again later." });
   }
 });
- 
-// RESET PASSWORD
-router.post("/reset-password/:token", async (req, res) => {
+
+// POST /api/auth/reset-password/:token
+router.post("/reset-password/:token", credentialLimiter, async (req, res, next) => {
   try {
     const { password } = req.body;
- 
-    if (!password)
-      return res.status(400).json({ error: "New password is required." });
- 
-    if (password.length < 6)
-      return res.status(400).json({ error: "Password must be at least 6 characters." });
- 
-    // Hash the incoming token to compare against the stored hash.
-    const hashedToken = crypto
-      .createHash("sha256")
-      .update(req.params.token)
-      .digest("hex");
- 
-    const tailor = await Tailor.findOne({
-      passwordResetToken:   hashedToken,
-      passwordResetExpires: { $gt: Date.now() },
+    const pwError = passwordProblem(password);
+    if (pwError) return res.status(400).json({ error: pwError });
+
+    const tailor = await prisma.tailor.findFirst({
+      where: {
+        passwordResetToken:   hashResetToken(req.params.token),
+        passwordResetExpires: { gt: new Date() },
+      },
     });
- 
+
     if (!tailor)
       return res.status(400).json({ error: "Reset link is invalid or has expired." });
- 
-    // The Tailor model's pre-save hook hashes the password automatically.
-    tailor.password             = password;
-    tailor.passwordResetToken   = undefined;
-    tailor.passwordResetExpires = undefined;
-    await tailor.save();
- 
-    const token = signToken(tailor._id);
-    res.json({ message: "Password reset successful.", token, tailor });
- 
+
+    const updated = await prisma.tailor.update({
+      where: { id: tailor.id },
+      data: {
+        password:             await bcrypt.hash(password, BCRYPT_ROUNDS),
+        passwordResetToken:   null,
+        passwordResetExpires: null,
+        passwordChangedAt:    new Date(),
+      },
+    });
+
+    res.json({
+      message: "Password reset successful.",
+      token:   signToken(updated.id),
+      tailor:  serialize.tailor(updated),
+    });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 

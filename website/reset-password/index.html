@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reset password · Trackseam</title>
+<meta name="trackseam-api" content="https://trackseam.onrender.com">
+<link rel="stylesheet" href="/legal-assets/site.css">
+</head>
+<body>
+<header><a href="/">✦ Trackseam</a></header>
+<main>
+<h1>Choose a new password</h1>
+<p class="meta">Reset links expire one hour after they are sent</p>
+<form id="form" class="card" novalidate>
+  <label for="password">New password</label>
+  <input id="password" name="password" type="password" autocomplete="new-password" minlength="8" required>
+  <label for="confirm">Confirm new password</label>
+  <input id="confirm" name="confirm" type="password" autocomplete="new-password" minlength="8" required>
+  <button id="submit" type="submit">Set new password</button>
+</form>
+<div id="msg" class="msg" role="status" style="max-width:440px"></div>
+<script src="/legal-assets/reset-password.js"></script>
+
+</main>
+<footer>
+  <a href="/privacy">Privacy Policy</a><a href="/terms">Terms of Use</a><a href="/support">Support</a><a href="/delete-account">Delete account</a>
+</footer>
+</body>
+</html>

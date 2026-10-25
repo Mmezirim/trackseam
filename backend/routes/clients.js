@@ -1,81 +1,91 @@
-const router = require("express").Router();
-const auth   = require("../middleware/auth");
-const Client = require("../models/Client");
-
+const router    = require("express").Router();
+const auth      = require("../middleware/auth");
+const prisma    = require("../lib/prisma");
+const serialize = require("../lib/serialize");
+const { str, tooLong } = require("../lib/validate");
 
 router.use(auth);
 
+const LIMITS = { clientId: 20, name: 120, phone: 40, email: 191, notes: 5000 };
+
 // GET /api/clients
-router.get("/", async (req, res) => {
+router.get("/", async (req, res, next) => {
   try {
-    const clients = await Client
-      .find({ tailor: req.tailor._id }, "-measurements")
-      .sort({ createdAt: -1 });
-    res.json(clients);
+    const clients = await prisma.client.findMany({
+      where:   { tailorId: req.tailor.id },
+      orderBy: { createdAt: "desc" },
+    });
+    res.json(clients.map(serialize.client));
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 
 // GET /api/clients/search?q=
-router.get("/search", async (req, res) => {
+router.get("/search", async (req, res, next) => {
   try {
-    const q = req.query.q?.trim();
+    const q = str(req.query.q).slice(0, 120);
     if (!q) return res.json([]);
-    const clients = await Client
-      .find(
-        { tailor: req.tailor._id, name: { $regex: q, $options: "i" } },
-        "-measurements"
-      )
-      .sort({ createdAt: -1 });
-    res.json(clients);
+    // The default MySQL collation is case-insensitive, so contains matches
+    // regardless of case.
+    const clients = await prisma.client.findMany({
+      where:   { tailorId: req.tailor.id, name: { contains: q } },
+      orderBy: { createdAt: "desc" },
+    });
+    res.json(clients.map(serialize.client));
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 
 // GET /api/clients/:id
-router.get("/:id", async (req, res) => {
+router.get("/:id", async (req, res, next) => {
   try {
-    const client = await Client.findOne({ _id: req.params.id, tailor: req.tailor._id }, "-measurements");
+    const client = await prisma.client.findFirst({
+      where: { id: req.params.id, tailorId: req.tailor.id },
+    });
     if (!client) return res.status(404).json({ error: "Client not found." });
-    res.json(client);
+    res.json(serialize.client(client));
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 
 // POST /api/clients
-router.post("/", async (req, res) => {
+router.post("/", async (req, res, next) => {
   try {
-    const { clientId, name, phone, email, notes } = req.body;
-    if (!name || !clientId)
+    const data = {
+      clientId: str(req.body.clientId),
+      name:     str(req.body.name),
+      phone:    str(req.body.phone),
+      email:    str(req.body.email),
+      notes:    str(req.body.notes),
+    };
+    if (!data.name || !data.clientId)
       return res.status(400).json({ error: "name and clientId are required." });
 
-    const client = await Client.create({
-      tailor: req.tailor._id,
-      clientId,
-      name,
-      phone,
-      email,
-      notes,
-    });
-    res.status(201).json(client);
+    const long = tooLong(LIMITS, data);
+    if (long) return res.status(400).json({ error: `${long} is too long (max ${LIMITS[long]} characters).` });
+
+    const client = await prisma.client.create({ data: { ...data, tailorId: req.tailor.id } });
+    res.status(201).json(serialize.client(client));
   } catch (err) {
-    if (err.code === 11000)
+    if (err.code === "P2002")
       return res.status(409).json({ error: "Client ID already exists in your account." });
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 
-// DELETE /api/clients/:id
-router.delete("/:id", async (req, res) => {
+// DELETE /api/clients/:id — measurements go with it via ON DELETE CASCADE.
+router.delete("/:id", async (req, res, next) => {
   try {
-    const result = await Client.findOneAndDelete({ _id: req.params.id, tailor: req.tailor._id });
-    if (!result) return res.status(404).json({ error: "Client not found." });
+    const { count } = await prisma.client.deleteMany({
+      where: { id: req.params.id, tailorId: req.tailor.id },
+    });
+    if (!count) return res.status(404).json({ error: "Client not found." });
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 
