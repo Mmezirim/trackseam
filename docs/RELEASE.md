@@ -165,6 +165,16 @@ Upload the folders `privacy`, `terms`, `support`, `delete-account`, `reset-passw
 `legal-assets` from `website/` as they are. Don't delete anything already in `public_html`,
 because the existing home page is in there. Then open https://trackseam.com/privacy to check.
 
+Also upload `website/index.html` (replacing the existing one) and `website/store-buttons.js`.
+Until the apps are live, that script makes the "App Store" / "Google Play" buttons show a
+"coming soon" notice and then redirect to the web version at app.trackseam.com.
+`index.html` is the live home page with one extra line,
+`<script defer src="/store-buttons.js"></script>`. If the home page is ever rebuilt and
+re-uploaded, add that line to the new `index.html` before `</head>`.
+
+When a store listing goes live, put its URL in `STORE_URLS` at the top of
+`website/store-buttons.js` and re-upload that file; the button then opens the store.
+
 Re-run `build:website` and re-upload whenever you change a policy. Update the
 "Effective" date at the top of `backend/public/pages/privacy.html` / `terms.html` when you do.
 
