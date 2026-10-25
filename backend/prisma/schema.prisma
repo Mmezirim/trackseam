@@ -15,6 +15,8 @@ model Tailor {
   passwordResetToken   String?   @db.VarChar(64)
   passwordResetExpires DateTime?
   passwordChangedAt    DateTime?
+  // Unit new measurements are entered and shown in: "in" or "cm".
+  preferredUnit        String    @default("in") @db.VarChar(8)
   createdAt            DateTime  @default(now())
   updatedAt            DateTime  @updatedAt
   clients              Client[]
@@ -50,6 +52,9 @@ model Measurement {
   // column, because MySQL re-sorts JSON object keys and the order of the
   // fields (Chest, Waist, Shoulder, ...) matters to the tailor.
   fields      String   @db.Text
+  // Unit the values in fields were entered in. Records made before units
+  // existed were all centimetres.
+  unit        String   @default("cm") @db.VarChar(8)
   notes       String   @db.Text
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt

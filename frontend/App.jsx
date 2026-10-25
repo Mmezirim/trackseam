@@ -1,11 +1,13 @@
 import { useState, useEffect, useCallback, useRef, createContext, useContext } from "react";
-import { jsPDF } from "jspdf";
 import { Capacitor, SystemBars, SystemBarsStyle } from "@capacitor/core";
 import { App as NativeApp } from "@capacitor/app";
 import { Browser } from "@capacitor/browser";
 import { Filesystem, Directory } from "@capacitor/filesystem";
 import { Share } from "@capacitor/share";
-import Logo from "./assets/trackseamlogo.jpeg"
+import { SplashScreen } from "@capacitor/splash-screen";
+import Logo from "./assets/trackseam-logo-white.png"
+import LogoInk from "./assets/trackseam-logo-ink.png"
+import { THEMES, getThemePref, setThemePref, resolvedTheme } from "./theme.js"
 
 // CONFIG
 const API_BASE  = (import.meta.env.VITE_API_BASE || "https://trackseam.onrender.com/api").replace(/\/+$/, "");
@@ -34,13 +36,61 @@ function useBackHandler(handler) {
   }, []);
 }
 
+const runBack = () => {
+  const top = backHandlers[backHandlers.length - 1];
+  if (!top) return false;
+  top();
+  return true;
+};
+
 if (IS_NATIVE) {
   NativeApp.addListener("backButton", () => {
-    const top = backHandlers[backHandlers.length - 1];
-    if (top) top();
-    else NativeApp.exitApp();
+    if (!runBack()) NativeApp.exitApp();
   });
 }
+
+// iOS SWIPE BACK — iPhones have no back button, so a swipe in from the left
+// edge runs the same handlers. The open modal (or the page) follows the finger.
+function installEdgeSwipe() {
+  const EDGE = 30, TRIGGER = 80;
+  let startX = null, startY = 0, layer = null;
+
+  const reset = () => {
+    if (layer) {
+      layer.style.transition = "transform 0.2s ease";
+      layer.style.transform = "";
+    }
+    startX = null;
+    layer = null;
+  };
+
+  window.addEventListener("touchstart", (e) => {
+    const t = e.touches[0];
+    if (e.touches.length !== 1 || t.clientX > EDGE || !backHandlers.length) return;
+    startX = t.clientX;
+    startY = t.clientY;
+    layer = document.querySelector(".modal") || document.querySelector(".main");
+    if (layer) layer.style.transition = "none";
+  }, { passive: true });
+
+  window.addEventListener("touchmove", (e) => {
+    if (startX === null) return;
+    const t = e.touches[0];
+    const dx = t.clientX - startX, dy = Math.abs(t.clientY - startY);
+    if (dy > 40 && dy > dx) return reset(); // vertical scroll, not a swipe
+    if (layer && dx > 0) layer.style.transform = `translateX(${dx * 0.5}px)`;
+  }, { passive: true });
+
+  window.addEventListener("touchend", (e) => {
+    if (startX === null) return;
+    const dx = e.changedTouches[0].clientX - startX;
+    reset();
+    if (dx > TRIGGER) runBack();
+  });
+  window.addEventListener("touchcancel", reset);
+}
+
+if (Capacitor.getPlatform() === "ios") installEdgeSwipe();
 
 // AUTH CONTEXT
 const AuthContext = createContext(null);
@@ -59,6 +109,41 @@ const formatDate = (d) =>
     year: "numeric",
   });
 
+// UNITS — values are saved exactly as typed, together with the unit they were
+// typed in. Conversion only happens for display and PDF export.
+// Keep in sync with UNITS in backend/lib/validate.js.
+const UNITS = {
+  in: { label: "in", name: "Inches",      perCm: 1 / 2.54 },
+  cm: { label: "cm", name: "Centimetres", perCm: 1 },
+};
+const DEFAULT_UNIT = "in";
+
+const convertValue = (value, from, to) => {
+  if (value === "" || value == null) return "";
+  if (from === to || !UNITS[from] || !UNITS[to]) return String(value);
+  const n = Number(value);
+  if (!Number.isFinite(n)) return String(value);
+  const converted = (n / UNITS[from].perCm) * UNITS[to].perCm;
+  return String(Math.round(converted * 100) / 100);
+};
+
+function UnitToggle({ value, onChange }) {
+  return (
+    <div className="unit-toggle" role="radiogroup" aria-label="Measurement unit">
+      {Object.keys(UNITS).map((u) => (
+        <button
+          key={u}
+          type="button"
+          role="radio"
+          aria-checked={value === u}
+          className={value === u ? "active" : ""}
+          onClick={() => onChange(u)}
+        >{UNITS[u].label}</button>
+      ))}
+    </div>
+  );
+}
+
 // OUTFIT FIELDS
 const OUTFIT_FIELDS = {
   Shirt:   ["Chest", "Waist", "Shoulder", "Sleeve Length", "Back Length", "Neck"],
@@ -74,23 +159,44 @@ const OUTFIT_FIELDS = {
 // API
 const getToken = () => localStorage.getItem("tb_token");
 
+// The signed-in tailor is cached so the app can open straight to the client
+// list instead of waiting on the server (which may be waking up).
+const TAILOR_CACHE_KEY = "tb_tailor";
+const readCachedTailor = () => {
+  try { return JSON.parse(localStorage.getItem(TAILOR_CACHE_KEY)); } catch { return null; }
+};
+const writeCachedTailor = (t) => {
+  if (t) localStorage.setItem(TAILOR_CACHE_KEY, JSON.stringify(t));
+  else localStorage.removeItem(TAILOR_CACHE_KEY);
+};
+
+// Generous because a sleeping free-tier server can take most of a minute to wake.
+const REQUEST_TIMEOUT_MS = 60000;
+
 // Fired when a signed-in request comes back 401 (expired or revoked session).
 const UNAUTHORIZED_EVENT = "trackseam:unauthorized";
 
 const apiFetch = async (path, options = {}) => {
   const token = getToken();
   let r;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
     r = await fetch(`${API_BASE}${path}`, {
       ...options,
+      signal: controller.signal,
       headers: {
         "Content-Type": "application/json",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...options.headers,
       },
     });
-  } catch {
-    throw new Error("Can't reach Trackseam. Check your internet connection and try again.");
+  } catch (err) {
+    throw new Error(err.name === "AbortError"
+      ? "Trackseam is taking too long to respond. Please try again."
+      : "Can't reach Trackseam. Check your internet connection and try again.");
+  } finally {
+    clearTimeout(timer);
   }
   // Error pages from proxies or a sleeping host are HTML, not JSON.
   const data = await r.json().catch(() => ({}));
@@ -139,8 +245,12 @@ const savePdf = async (doc, filename) => {
   }
 };
 
-const exportMeasurement = (client, measurement, shopName) => {
+// unit is the unit to print in; values are converted from the measurement's own unit.
+const exportMeasurement = async (client, measurement, shopName, unit) => {
+  // jsPDF is large, so it's only loaded the first time someone exports.
+  const { jsPDF } = await import("jspdf");
   const doc = new jsPDF({ unit: "mm", format: "a4" });
+  const fromUnit = measurement.unit || "cm";
   const W = 210, H = 297;
   const ML = 20, MR = 20, MT = 20;
   const CW = W - ML - MR;
@@ -189,7 +299,7 @@ const exportMeasurement = (client, measurement, shopName) => {
     doc.setFont("helvetica", "normal");
     doc.setFontSize(7);
     setFaint();
-    doc.text("All measurements in centimetres (cm)", ML, H - 8);
+    doc.text(`All measurements in ${UNITS[unit].name.toLowerCase()} (${unit})`, ML, H - 8);
     doc.text(`Exported: ${new Date().toLocaleString()}`, W - MR, H - 8, { align: "right" });
   };
 
@@ -290,7 +400,7 @@ const exportMeasurement = (client, measurement, shopName) => {
   doc.setFontSize(8);
   setMuted();
   doc.text("Measurement",  ML + 5,     y + 5.5);
-  doc.text("Value (cm)",   W - MR - 5, y + 5.5, { align: "right" });
+  doc.text(`Value (${unit})`, W - MR - 5, y + 5.5, { align: "right" });
   y += 8;
 
   const fields = Object.entries(measurement.fields || {});
@@ -307,7 +417,8 @@ const exportMeasurement = (client, measurement, shopName) => {
     doc.setFont("helvetica", "normal");
     doc.setFontSize(9);
     doc.setTextColor(...MUTED);
-    doc.text(`${val} cm`, W - MR - 5, y + 6, { align: "right" });
+    const shown = convertValue(val, fromUnit, unit);
+    doc.text(shown ? `${shown} ${unit}` : "-", W - MR - 5, y + 6, { align: "right" });
 
     if (i < fields.length - 1) {
       doc.setDrawColor(...RULE);
@@ -392,7 +503,8 @@ function ForgotPasswordScreen({ onBack }) {
     <div className="auth-page">
       <div className="auth-card">
         <div className="auth-brand">
-          <img className="auth-logo" src={Logo} alt="Trackseam Logo" />
+          <img className="auth-logo logo-light-theme" src={LogoInk} alt="Trackseam Logo" />
+          <img className="auth-logo logo-dark-theme" src={Logo} alt="" />
           <span className="brand-name">Trackseam</span>
           <p className="auth-tagline">Reset your password</p>
         </div>
@@ -471,7 +583,8 @@ function ResetPasswordScreen({ resetToken, onAuth }) {
     <div className="auth-page">
       <div className="auth-card">
         <div className="auth-brand">
-          <img className="auth-logo" src={Logo} alt="Trackseam Logo" />
+          <img className="auth-logo logo-light-theme" src={LogoInk} alt="Trackseam Logo" />
+          <img className="auth-logo logo-dark-theme" src={Logo} alt="" />
           <span className="brand-name">Trackseam</span>
           <p className="auth-tagline">Choose a new password</p>
         </div>
@@ -556,7 +669,8 @@ function AuthPage({ onAuth, onForgotPassword }) {
     <div className="auth-page">
       <div className="auth-card">
         <div className="auth-brand">
-          <img className="auth-logo" src={Logo} alt="Trackseam Logo" />
+          <img className="auth-logo logo-light-theme" src={LogoInk} alt="Trackseam Logo" />
+          <img className="auth-logo logo-dark-theme" src={Logo} alt="" />
           <span className="brand-name">Trackseam</span>
           <p className="auth-tagline">
             {mode === "login" ? "Sign in to your shop account" : "Create your tailor shop account"}
@@ -652,7 +766,7 @@ function LegalLinks() {
 
 // ─── ACCOUNT PANEL ────────────────────────────────────────────────────────────
 
-function AccountPanel({ onUpdated, onLogout, onDeleted, onToast }) {
+function AccountPanel({ onUpdated, onLogout, onDeleted, onToast, theme, onThemeChange }) {
   const { tailor }                  = useAuth();
   const [shopName, setShopName]     = useState(tailor.shopName);
   const [saving, setSaving]         = useState(false);
@@ -673,6 +787,19 @@ function AccountPanel({ onUpdated, onLogout, onDeleted, onToast }) {
       setError(err.message);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const preferredUnit = tailor.preferredUnit || DEFAULT_UNIT;
+  const saveUnit = async (unit) => {
+    if (unit === preferredUnit) return;
+    setError("");
+    try {
+      const data = await api.updateMe({ preferredUnit: unit });
+      onUpdated(data.tailor);
+      onToast(`Measurements will now default to ${UNITS[unit].name.toLowerCase()}.`);
+    } catch (err) {
+      setError(err.message);
     }
   };
 
@@ -700,6 +827,26 @@ function AccountPanel({ onUpdated, onLogout, onDeleted, onToast }) {
         <button className="btn btn-ghost" onClick={saveShopName} disabled={saving || shopName.trim() === tailor.shopName}>
           {saving ? "Saving..." : "Save"}
         </button>
+      </div>
+
+      <label>Default Measurement Unit</label>
+      <div className="inline-row unit-row">
+        <UnitToggle value={preferredUnit} onChange={saveUnit} />
+        <span className="unit-hint">New measurements start in this unit. You can switch per measurement.</span>
+      </div>
+
+      <label>Appearance</label>
+      <div className="segmented" role="radiogroup" aria-label="Appearance">
+        {Object.entries(THEMES).map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            role="radio"
+            aria-checked={theme === value}
+            className={theme === value ? "active" : ""}
+            onClick={() => onThemeChange(value)}
+          >{label}</button>
+        ))}
       </div>
 
       <label>Legal & Help</label>
@@ -788,6 +935,8 @@ function AddClientForm({ onSave, onClose }) {
 // ADD MEASUREMENT FORM
 
 function AddMeasurementForm({ client, onSave, onClose }) {
+  const { tailor }                      = useAuth();
+  const [unit,         setUnit]         = useState(tailor?.preferredUnit || DEFAULT_UNIT);
   const [outfitType,   setOutfitType]   = useState("Shirt");
   const [description,  setDescription]  = useState("");
   const [notes,        setNotes]        = useState("");
@@ -816,7 +965,7 @@ function AddMeasurementForm({ client, onSave, onClose }) {
     setError("");
     setLoading(true);
     try {
-      const res = await api.addMeasurement(client.id, { outfitType, description, notes, fields });
+      const res = await api.addMeasurement(client.id, { outfitType, description, notes, fields, unit });
       onSave(res);
     } catch (err) {
       setError(err.message);
@@ -837,7 +986,10 @@ function AddMeasurementForm({ client, onSave, onClose }) {
       <label>Description *</label>
       <input className="input" placeholder="e.g. Wedding suit for December" value={description} onChange={(e) => setDescription(e.target.value)} />
 
-      <label>Measurements (cm)</label>
+      <div className="label-row">
+        <label>Measurements ({unit})</label>
+        <UnitToggle value={unit} onChange={setUnit} />
+      </div>
       <div className="meas-grid">
         {currentFields.map((f) => (
           <div key={f} className="meas-item">
@@ -852,7 +1004,7 @@ function AddMeasurementForm({ client, onSave, onClose }) {
               value={fields[f] || ""}
               onChange={(e) => setFields({ ...fields, [f]: e.target.value })}
             />
-            <span className="meas-unit">cm</span>
+            <span className="meas-unit">{unit}</span>
           </div>
         ))}
         {outfitType === "Custom" && (
@@ -886,6 +1038,8 @@ function ClientDetail({ client, onBack, onToast }) {
   const [showAdd, setShowAdd]           = useState(false);
   const [expanded, setExpanded]         = useState(null);
   const [loadError, setLoadError]       = useState("");
+  // Unit to show values (and export PDFs) in; each measurement converts from its own unit.
+  const [displayUnit, setDisplayUnit]   = useState(tailor?.preferredUnit || DEFAULT_UNIT);
 
   useBackHandler(onBack);
 
@@ -915,7 +1069,7 @@ function ClientDetail({ client, onBack, onToast }) {
 
   const handleExport = async (m) => {
     try {
-      await exportMeasurement(client, m, tailor?.shopName);
+      await exportMeasurement(client, m, tailor?.shopName, displayUnit);
     } catch (err) {
       onToast(`Couldn't export PDF: ${err.message}`);
     }
@@ -956,6 +1110,10 @@ function ClientDetail({ client, onBack, onToast }) {
         </div>
       ) : (
         <div className="meas-list">
+          <div className="meas-list-toolbar">
+            <span className="meas-count">{measurements.length} measurement{measurements.length === 1 ? "" : "s"}</span>
+            <UnitToggle value={displayUnit} onChange={setDisplayUnit} />
+          </div>
           {measurements.map((m) => (
             <div key={m.id} className="meas-card">
               <div className="meas-card-header" onClick={() => setExpanded(expanded === m.id ? null : m.id)}>
@@ -981,12 +1139,15 @@ function ClientDetail({ client, onBack, onToast }) {
               {expanded === m.id && (
                 <div className="meas-card-body">
                   <div className="meas-fields-grid">
-                    {Object.entries(m.fields || {}).map(([k, v]) => (
-                      <div key={k} className="meas-field-row">
-                        <span className="field-key">{k}</span>
-                        <span className="field-val">{v} cm</span>
-                      </div>
-                    ))}
+                    {Object.entries(m.fields || {}).map(([k, v]) => {
+                      const shown = convertValue(v, m.unit || "cm", displayUnit);
+                      return (
+                        <div key={k} className="meas-field-row">
+                          <span className="field-key">{k}</span>
+                          <span className="field-val">{shown ? `${shown} ${displayUnit}` : "—"}</span>
+                        </div>
+                      );
+                    })}
                   </div>
                   {m.notes && <p className="meas-notes">Notes: {m.notes}</p>}
                 </div>
@@ -1108,35 +1269,47 @@ function ClientList({ onSelect, onToast }) {
 
 // ─── APP ROOT ─────────────────────────────────────────────────────────────────
 
+// Detect ?resetToken=<token> in the URL (web only; emails now link to the
+// server-hosted reset page, but older links point here).
+const initialResetToken = new URLSearchParams(window.location.search).get("resetToken");
+// With a saved session, start on the client list right away and refresh the
+// account in the background, rather than blocking on a possibly-asleep server.
+const initialTailor = !initialResetToken && getToken() ? readCachedTailor() : null;
+
 export default function App() {
-  const [tailor,         setTailor]         = useState(null);
-  const [authChecked,    setAuthChecked]     = useState(false);
+  const [tailor,         setTailorState]    = useState(initialTailor);
+  const [authChecked,    setAuthChecked]     = useState(Boolean(initialTailor) || !getToken() || Boolean(initialResetToken));
   const [authScreen,     setAuthScreen]      = useState("login"); // "login" | "forgot" | "reset"
   const [view,           setView]           = useState("clients");
   const [selectedClient, setSelectedClient] = useState(null);
   const [showAccount,    setShowAccount]    = useState(false);
   const [toast,          setToast]          = useState(null);
 
-  // Detect ?resetToken=<token> in the URL (web only; emails now link to the
-  // server-hosted reset page, but older links point here).
-  const resetToken = new URLSearchParams(window.location.search).get("resetToken");
+  const resetToken = initialResetToken;
 
-  // ON MOUNT: CHECK AUTH
+  const setTailor = useCallback((t) => {
+    writeCachedTailor(t);
+    setTailorState(t);
+  }, []);
+
+  // ON MOUNT: CONFIRM THE SAVED SESSION
   useEffect(() => {
-    // If a reset token is present, skip auth check and go straight to reset screen
-    if (resetToken) { setAuthChecked(true); return; }
-
-    const token = localStorage.getItem("tb_token");
-    if (!token) { setAuthChecked(true); return; }
-
+    if (resetToken || !getToken()) return;
     api.me()
       .then((data) => setTailor(data.tailor))
       .catch((err) => {
-        // Keep the session when offline; only a rejected token signs you out.
-        if (err.status === 401) localStorage.removeItem("tb_token");
+        // Keep the session when offline; only a rejected token signs you out
+        // (apiFetch fires UNAUTHORIZED_EVENT for that).
+        if (err.status === 401) { localStorage.removeItem("tb_token"); writeCachedTailor(null); }
       })
       .finally(() => setAuthChecked(true));
   }, []);  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The native splash stays up (launchAutoHide: false) until React has drawn
+  // the first screen, so there's no blank flash between the two.
+  useEffect(() => {
+    if (IS_NATIVE) SplashScreen.hide({ fadeOutDuration: 200 }).catch(() => {});
+  }, []);
 
   const handleLogout = useCallback(() => {
     localStorage.removeItem("tb_token");
@@ -1145,7 +1318,7 @@ export default function App() {
     setView("clients");
     setSelectedClient(null);
     setShowAccount(false);
-  }, []);
+  }, [setTailor]);
 
   // Any request rejected with 401 means the session expired or was revoked.
   useEffect(() => {
@@ -1153,11 +1326,15 @@ export default function App() {
     return () => window.removeEventListener(UNAUTHORIZED_EVENT, handleLogout);
   }, [handleLogout]);
 
-  // Light status-bar icons over the dark app header; dark icons on the light sign-in screens.
+  const [theme, setTheme] = useState(getThemePref);
+  const changeTheme = (pref) => { setThemePref(pref); setTheme(pref); };
+
+  // Light status-bar icons over the ink header or a dark sign-in screen; dark icons on the light sign-in screens.
   useEffect(() => {
     if (!IS_NATIVE) return;
-    SystemBars.setStyle({ style: tailor ? SystemBarsStyle.Dark : SystemBarsStyle.Light }).catch(() => {});
-  }, [tailor]);
+    const light = tailor || resolvedTheme(theme) === "dark";
+    SystemBars.setStyle({ style: light ? SystemBarsStyle.Dark : SystemBarsStyle.Light }).catch(() => {});
+  }, [tailor, theme]);
 
   const handleAuth  = (t) => {
     setTailor(t);
@@ -1217,14 +1394,19 @@ export default function App() {
         <header className="header">
           <div className="header-inner">
             <div className="brand">
-              <span className="brand-mark">✦</span>
-              <span className="brand-name">Trackseam</span>
+              <img className="brand-logo" src={Logo} alt="" />
+              <div className="brand-text">
+                <span className="brand-name">Trackseam</span>
+                <span className="header-shop-name">{tailor.shopName}</span>
+              </div>
             </div>
-            <div className="header-shop">
-              <span className="header-shop-name">{tailor.shopName}</span>
-              <span className="header-tagline">Client Measurement Records</span>
-            </div>
-            <button className="logout-btn" onClick={() => setShowAccount(true)} title="Account">Account</button>
+            <span className="header-tagline">Client Measurement Records</span>
+            <button
+              className="account-btn"
+              onClick={() => setShowAccount(true)}
+              aria-label="Account"
+              title="Account"
+            >{(tailor.shopName || "?").trim().charAt(0).toUpperCase()}</button>
           </div>
         </header>
 
@@ -1235,6 +1417,8 @@ export default function App() {
               onLogout={handleLogout}
               onDeleted={handleDeleted}
               onToast={showToast}
+              theme={theme}
+              onThemeChange={changeTheme}
             />
           </Modal>
         )}
@@ -1269,11 +1453,15 @@ const CSS = `
 
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+  /* Light is the default; Account → Appearance can switch to dark (data-theme on <html>).
+     The header stays ink in both, carrying the white brand logo. */
   :root {
+    color-scheme: light;
     --bg:           #FAFAF8;
     --surface:      #FFFFFF;
     --border:       #E2E0DC;
     --border-strong:#C8C4BC;
+    --header-bg:    #1A1916;
     --text:         #1A1916;
     --text-muted:   #706C64;
     --text-faint:   #A09C94;
@@ -1287,7 +1475,28 @@ const CSS = `
     --shadow:       0 1px 3px rgba(0,0,0,0.08);
     --shadow-lg:    0 4px 16px rgba(0,0,0,0.10);
   }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg:           #1A1916;
+    --surface:      #23221F;
+    --border:       #34322D;
+    --border-strong:#4A4740;
+    --header-bg:    #12110F;
+    --text:         #F2F0EB;
+    --text-muted:   #A8A39A;
+    --text-faint:   #77736B;
+    --accent:       #F2F0EB;
+    --accent-fg:    #1A1916;
+    --danger:       #E58A8A;
+    --danger-light: rgba(229,138,138,0.12);
+    --shadow:       0 1px 3px rgba(0,0,0,0.4);
+    --shadow-lg:    0 8px 28px rgba(0,0,0,0.45);
+  }
+  .logo-dark-theme { display: none; }
+  :root[data-theme="dark"] .logo-dark-theme { display: inline-block; }
+  :root[data-theme="dark"] .logo-light-theme { display: none; }
 
+  html { background: var(--bg); }
   body { background: var(--bg); color: var(--text); font-family: var(--serif); font-size: 16px; line-height: 1.6; -webkit-tap-highlight-color: transparent; overscroll-behavior-y: none; }
   .app { min-height: 100vh; display: flex; flex-direction: column; padding-bottom: env(safe-area-inset-bottom, 0px); }
 
@@ -1302,8 +1511,8 @@ const CSS = `
     margin-bottom: 20px;
   }
   .auth-logo {
-    width: 100px;
-    height: 60px;
+    width: 120px;
+    height: auto;
     transition: transform 0.3s ease, opacity 0.3s ease;
   }
   .auth-logo:hover {
@@ -1332,71 +1541,40 @@ const CSS = `
   .reset-success-text { font-size: 14px; color: var(--text-muted); line-height: 1.6; }
 
   /* ── HEADER ── */
-  .header { background: var(--text); color: var(--accent-fg); border-bottom: 2px solid var(--text); padding-top: env(safe-area-inset-top, 0px); position: sticky; top: 0; z-index: 50; }
-  .header-inner { 
-    max-width: 960px; 
-    margin: 0 auto; 
-    padding: 12px 24px; 
-    display: grid; 
-    grid-template-columns: 1fr auto; 
-    grid-template-rows: auto auto; 
-    align-items: center; 
-    gap: 0 16px; 
+  .header {
+    background: var(--header-bg); color: #FAFAF8;
+    border-bottom: 1px solid rgba(250,250,248,0.08);
+    padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) 0 env(safe-area-inset-left, 0px);
+    position: sticky; top: 0; z-index: 50;
   }
-  .brand { 
-    display: flex; 
-    align-items: center; 
-    gap: 10px; 
-    grid-column: 1; 
-    grid-row: 1; 
+  .header-inner {
+    max-width: 960px; margin: 0 auto; height: 60px; padding: 0 20px;
+    display: flex; align-items: center; gap: 16px;
   }
-  .brand-mark { font-size: 18px; opacity: 0.7; }
-  .brand-name { font-family: var(--serif); font-size: 22px; font-weight: 600; letter-spacing: 0.02em; }
-  .header-shop { 
-    display: flex; 
-    flex-direction: row; 
-    align-items: center; 
-    gap: 8px; 
-    grid-column: 1; 
-    grid-row: 2; 
-    padding-left: 28px; 
+  .brand { display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1; }
+  .brand-logo { height: 26px; width: auto; flex-shrink: 0; }
+  .brand-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.15; }
+  .brand-name { font-family: var(--serif); font-size: 20px; font-weight: 600; letter-spacing: 0.02em; }
+  .header-shop-name {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.04em;
+    color: rgba(250,250,248,0.55);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  .header-shop-name { 
-    font-family: var(--serif); 
-    font-size: 13px; 
-    font-weight: 500; 
-    opacity: 0.75; 
+  .header-tagline {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: rgba(250,250,248,0.35); white-space: nowrap;
   }
-  .header-tagline { 
-    font-family: var(--mono); 
-    font-size: 10px; 
-    letter-spacing: 0.08em; 
-    text-transform: uppercase; 
-    opacity: 0.4; 
+  .account-btn {
+    width: 38px; height: 38px; flex-shrink: 0; border-radius: 50%;
+    border: 1px solid rgba(250,250,248,0.25); background: rgba(250,250,248,0.06);
+    color: #FAFAF8; font-family: var(--serif); font-size: 17px; font-weight: 600;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    transition: background 0.15s, border-color 0.15s;
   }
-  .header-shop-name { font-family: var(--serif); font-size: 15px; font-weight: 500; opacity: 0.9; }
-  .header-tagline { font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.4; }
-  .logout-btn { 
-    grid-column: 2; 
-    grid-row: 1; 
-    background: none; 
-    border: 1px solid rgba(250,250,248,0.25); 
-    color: var(--accent-fg); 
-    padding: 6px 14px; 
-    border-radius: var(--radius); 
-    font-family: var(--mono); 
-    font-size: 11px; 
-    letter-spacing: 0.06em; 
-    text-transform: uppercase; 
-    cursor: pointer; 
-    opacity: 0.7; 
-    transition: opacity 0.15s; 
-    align-self: center;
-  }
-  .logout-btn:hover { opacity: 1; }
+  .account-btn:hover, .account-btn:active { background: rgba(250,250,248,0.14); border-color: rgba(250,250,248,0.5); }
 
   /* ── MAIN ── */
-  .main { flex: 1; padding: 36px 24px; }
+  .main { flex: 1; padding: 32px max(20px, env(safe-area-inset-right, 0px)) 32px max(20px, env(safe-area-inset-left, 0px)); }
   .container { max-width: 960px; margin: 0 auto; }
   .page-title-row { margin-bottom: 24px; border-bottom: 1px solid var(--border); padding-bottom: 16px; }
   .page-title { font-family: var(--serif); font-size: 28px; font-weight: 500; }
@@ -1407,7 +1585,8 @@ const CSS = `
 
   /* ── INPUTS ── */
   .input { width: 100%; padding: 9px 12px; border: 1px solid var(--border); border-radius: var(--radius); font-family: var(--serif); font-size: 16px; background: var(--surface); color: var(--text); outline: none; transition: border 0.15s; }
-  .input:focus { border-color: var(--text); }
+  .input:focus { border-color: var(--text-muted); }
+  .input::placeholder { color: var(--text-faint); }
   .textarea { resize: vertical; min-height: 72px; }
   .meas-input { width: 80px; text-align: center; }
 
@@ -1474,8 +1653,8 @@ const CSS = `
   .custom-add { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 4px; }
 
   /* ── MODAL ── */
-  .overlay { position: fixed; inset: 0; background: rgba(26,25,22,0.55); display: flex; align-items: center; justify-content: center; z-index: 100; padding: calc(20px + env(safe-area-inset-top, 0px)) 20px calc(20px + env(safe-area-inset-bottom, 0px)); }
-  .modal { background: var(--surface); border-radius: var(--radius); width: 100%; max-width: 520px; max-height: 88vh; overflow-y: auto; box-shadow: var(--shadow-lg); }
+  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 100; padding: calc(20px + env(safe-area-inset-top, 0px)) 20px calc(20px + env(safe-area-inset-bottom, 0px)); }
+  .modal { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); width: 100%; max-width: 520px; max-height: 88vh; overflow-y: auto; box-shadow: var(--shadow-lg); }
   .modal-header { display: flex; justify-content: space-between; align-items: center; padding: 18px 20px; border-bottom: 1px solid var(--border); }
   .modal-title { font-family: var(--serif); font-size: 18px; font-weight: 500; }
   .modal-body { padding: 20px; }
@@ -1485,7 +1664,7 @@ const CSS = `
   @keyframes spin { to { transform: rotate(360deg); } }
 
   /* ── TOAST ── */
-  .toast { position: fixed; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); max-width: calc(100% - 32px); left: 50%; transform: translateX(-50%); background: var(--text); color: var(--accent-fg); padding: 10px 20px; border-radius: var(--radius); font-family: var(--mono); font-size: 13px; z-index: 200; box-shadow: var(--shadow-lg); animation: fadeUp 0.2s ease; }
+  .toast { position: fixed; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); width: max-content; max-width: calc(100% - 32px); text-align: center; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--accent-fg); padding: 10px 20px; border-radius: var(--radius); font-family: var(--mono); font-size: 13px; z-index: 200; box-shadow: var(--shadow-lg); animation: fadeUp 0.2s ease; }
   @keyframes fadeUp { from { opacity: 0; transform: translateX(-50%) translateY(8px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
 
   /* ── EMPTY ── */
@@ -1499,13 +1678,36 @@ const CSS = `
   .legal-links { display: flex; justify-content: center; gap: 8px; margin-top: 16px; font-size: 12px; color: var(--text-faint); }
   .legal-links .link-btn { font-size: 12px; color: var(--text-faint); text-decoration: none; }
 
+  /* ── UNITS ── */
+  .unit-toggle { display: inline-flex; border: 1px solid var(--border-strong); border-radius: 20px; padding: 2px; flex-shrink: 0; }
+  .unit-toggle button {
+    border: none; background: none; cursor: pointer; color: var(--text-muted);
+    font-family: var(--mono); font-size: 12px; letter-spacing: 0.04em;
+    padding: 4px 12px; border-radius: 16px; min-width: 40px;
+  }
+  .unit-toggle button.active { background: var(--accent); color: var(--accent-fg); }
+  .label-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 4px; }
+  .label-row label { margin-top: 0; }
+  .meas-list-toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+  .meas-count { font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-faint); }
+  .unit-row { align-items: center; }
+  .unit-hint { font-size: 13px; color: var(--text-faint); line-height: 1.4; }
+
+  .segmented { display: flex; border: 1px solid var(--border-strong); border-radius: var(--radius); overflow: hidden; }
+  .segmented button {
+    flex: 1; padding: 9px 6px; border: none; background: none; cursor: pointer;
+    font-family: var(--serif); font-size: 15px; color: var(--text-muted);
+  }
+  .segmented button + button { border-left: 1px solid var(--border-strong); }
+  .segmented button.active { background: var(--accent); color: var(--accent-fg); }
+
   /* ── ACCOUNT ── */
   .account-email { font-size: 15px; word-break: break-all; }
   .inline-row { display: flex; gap: 8px; }
   .account-links { display: flex; flex-wrap: wrap; gap: 16px; }
   .danger-zone { margin-top: 12px; padding-top: 14px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 10px; }
   .danger-text { font-size: 14px; color: var(--danger); }
-  .btn-danger { background: var(--danger); color: #fff; border-color: var(--danger); }
+  .btn-danger { background: var(--danger); color: var(--accent-fg); border-color: var(--danger); }
   .btn-danger:disabled { opacity: 0.5; cursor: not-allowed; }
   .btn-danger-ghost { background: transparent; color: var(--danger); border-color: var(--border); }
   .btn-danger-ghost:hover { background: var(--danger-light); }
@@ -1518,9 +1720,14 @@ const CSS = `
     .detail-header { flex-direction: column; gap: 12px; }
     .btn-primary { margin-left: 0 !important; }
     .auth-card { padding: 28px 20px; }
-    .auth-logo { width: 56px; height: 40px; }
-    .header-inner { padding: 10px 16px; }
-    .header-shop { padding-left: 22px; }
-    .header-tagline { font-size: 8px }
+    .auth-logo { width: 96px; }
+    .header-inner { height: 56px; padding: 0 16px; gap: 12px; }
+    .header-tagline { display: none; }
+    .brand-logo { height: 22px; }
+    .brand-name { font-size: 18px; }
+    .main { padding-top: 22px; padding-bottom: 24px; }
+    .page-title { font-size: 24px; }
+    .list-toolbar { flex-wrap: wrap; }
+    .list-toolbar .btn-primary { flex: 1; }
   }
 `;

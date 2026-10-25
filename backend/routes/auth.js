@@ -6,7 +6,7 @@ const rateLimit = require("express-rate-limit");
 const prisma    = require("../lib/prisma");
 const auth      = require("../middleware/auth");
 const serialize = require("../lib/serialize");
-const { str, isEmail, passwordProblem } = require("../lib/validate");
+const { str, isEmail, passwordProblem, UNITS } = require("../lib/validate");
 const { sendResetEmail } = require("../utils/mailer");
 
 const BCRYPT_ROUNDS = 12;
@@ -93,18 +93,29 @@ router.get("/me", auth, (req, res) => {
   res.json({ tailor: serialize.tailor(req.tailor) });
 });
 
-// PATCH /api/auth/me
+// PATCH /api/auth/me — { shopName?, preferredUnit? }
 router.patch("/me", auth, async (req, res, next) => {
   try {
-    const shopName = str(req.body.shopName);
-    if (!shopName)
-      return res.status(400).json({ error: "Shop name is required." });
-    if (shopName.length > 120)
-      return res.status(400).json({ error: "Shop name must be 120 characters or fewer." });
+    const data = {};
+    if (req.body.shopName !== undefined) {
+      const shopName = str(req.body.shopName);
+      if (!shopName)
+        return res.status(400).json({ error: "Shop name is required." });
+      if (shopName.length > 120)
+        return res.status(400).json({ error: "Shop name must be 120 characters or fewer." });
+      data.shopName = shopName;
+    }
+    if (req.body.preferredUnit !== undefined) {
+      if (!UNITS.includes(req.body.preferredUnit))
+        return res.status(400).json({ error: `preferredUnit must be one of: ${UNITS.join(", ")}.` });
+      data.preferredUnit = req.body.preferredUnit;
+    }
+    if (!Object.keys(data).length)
+      return res.status(400).json({ error: "Nothing to update." });
 
     const tailor = await prisma.tailor.update({
       where: { id: req.tailor.id },
-      data:  { shopName },
+      data,
     });
     res.json({ tailor: serialize.tailor(tailor) });
   } catch (err) {

@@ -133,3 +133,38 @@ real content. Don't put the password in this repo.
 > • Account (top right) → Privacy Policy, Terms of Use, Support, Sign out, and
 >   **Delete account**, which permanently deletes the account and all its data.
 > • New users can register in the app. No payment or special hardware is required.
+
+---
+
+## TestFlight: external testing
+
+App Store Connect → Trackseam → TestFlight. External testers (anyone with a link)
+need a one-time **Beta App Review**, usually within a day. Internal testers (people on
+your App Store Connect team) don't.
+
+**Test Information** (TestFlight → Test Information, left sidebar):
+
+| Field | Value |
+|---|---|
+| Beta App Description | Trackseam is a record book for tailors and fashion designers. Register clients, record their measurements for each outfit in inches or centimetres, and export clean PDF measurement sheets to print or share. |
+| Feedback Email | contact@trackseam.com |
+| Marketing URL | https://trackseam.com |
+| Privacy Policy URL | https://trackseam.com/privacy |
+| Beta App Review: contact | your name, phone, contact@trackseam.com |
+| Sign-in required | Yes, with the demo account (same one as the App Review notes above) |
+| Review notes | Use the demo account to see sample clients. Tap a client to view measurements; switch in/cm at the top of the list; "↓ PDF" opens the share sheet; Account (top-right circle) has settings, policies and Delete account. |
+
+**What to Test** (per build, shown to testers):
+
+> Thanks for testing Trackseam!
+> • Register your shop (or sign in) and add a few real clients.
+> • Add measurements for different outfit types. Inches is the default; switch to cm in the form or under Account → Default Measurement Unit.
+> • Open a client and switch between in and cm. Export a PDF and share it to WhatsApp or save it to Files.
+> • On iPhone, swipe in from the left edge to go back.
+> • Try Account → Appearance → Dark.
+> Report anything confusing or broken with a screenshot via TestFlight (screenshot → Share Beta Feedback) or contact@trackseam.com.
+
+**Inviting testers:** TestFlight → External Testing → **+** → create a group (for example
+"Tailors beta") → add the build → **Submit for Review**. Once approved, open the group,
+turn on **Public Link**, and share that link; anyone with it can install via the
+TestFlight app (you can cap the number of testers). Or add testers by email.

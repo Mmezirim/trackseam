@@ -5,6 +5,7 @@ const tailor = (t) => ({
   id:        t.id,
   shopName:  t.shopName,
   email:     t.email,
+  preferredUnit: t.preferredUnit,
   createdAt: t.createdAt,
 });
 
@@ -33,6 +34,7 @@ const measurement = (m) => ({
   outfitType:  m.outfitType,
   description: m.description,
   fields:      parseFields(m.fields),
+  unit:        m.unit,
   notes:       m.notes,
   createdAt:   m.createdAt,
   updatedAt:   m.updatedAt,

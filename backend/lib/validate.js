@@ -9,6 +9,9 @@ const isEmail = (v) => EMAIL_RE.test(v) && v.length <= 191;
 const tooLong = (limits, values) =>
   Object.keys(limits).find((k) => (values[k] || "").length > limits[k]);
 
+// Measurement units the app supports. Keep in sync with UNITS in frontend/App.jsx.
+const UNITS = ["in", "cm"];
+
 const PASSWORD_MIN = 8;
 const PASSWORD_MAX = 72; // bcrypt ignores bytes past 72
 
@@ -19,4 +22,4 @@ const passwordProblem = (pw) => {
   return null;
 };
 
-module.exports = { str, isEmail, tooLong, passwordProblem };
+module.exports = { str, isEmail, tooLong, passwordProblem, UNITS };

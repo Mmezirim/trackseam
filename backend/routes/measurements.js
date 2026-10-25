@@ -2,7 +2,7 @@ const router    = require("express").Router();
 const auth      = require("../middleware/auth");
 const prisma    = require("../lib/prisma");
 const serialize = require("../lib/serialize");
-const { str, tooLong } = require("../lib/validate");
+const { str, tooLong, UNITS } = require("../lib/validate");
 
 router.use(auth);
 
@@ -57,6 +57,11 @@ router.post("/:id/measurements", async (req, res, next) => {
     const long = tooLong(LIMITS, data);
     if (long) return res.status(400).json({ error: `${long} is too long (max ${LIMITS[long]} characters).` });
 
+    // App versions before units existed always meant centimetres.
+    const unit = req.body.unit === undefined ? "cm" : req.body.unit;
+    if (!UNITS.includes(unit))
+      return res.status(400).json({ error: `unit must be one of: ${UNITS.join(", ")}.` });
+
     const fields = cleanFields(req.body.fields);
     if (!fields) return res.status(400).json({ error: `fields must be an object with at most ${MAX_FIELDS} entries.` });
 
@@ -64,7 +69,7 @@ router.post("/:id/measurements", async (req, res, next) => {
     if (!client) return res.status(404).json({ error: "Client not found." });
 
     const saved = await prisma.measurement.create({
-      data: { ...data, fields: JSON.stringify(fields), clientRefId: client.id },
+      data: { ...data, unit, fields: JSON.stringify(fields), clientRefId: client.id },
     });
     res.status(201).json(serialize.measurement(saved));
   } catch (err) {

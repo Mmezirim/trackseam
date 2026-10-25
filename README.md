@@ -100,7 +100,7 @@ All `/api/clients` routes require `Authorization: Bearer <token>`.
 | POST | `/api/auth/register` | Create account `{ shopName, email, password }` |
 | POST | `/api/auth/login` | Sign in `{ email, password }` |
 | GET | `/api/auth/me` | Current account |
-| PATCH | `/api/auth/me` | Rename shop `{ shopName }` |
+| PATCH | `/api/auth/me` | Update `{ shopName?, preferredUnit? }` (`"in"` or `"cm"`) |
 | DELETE | `/api/auth/me` | Delete account and all data `{ password }` |
 | POST | `/api/auth/forgot-password` | Email a reset link `{ email }` |
 | POST | `/api/auth/reset-password/:token` | Set new password `{ password }` |
@@ -120,8 +120,11 @@ All `/api/clients` routes require `Authorization: Bearer <token>`.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/clients/:id/measurements` | Measurements for a client, newest first |
-| POST | `/api/clients/:id/measurements` | Add `{ outfitType, description, fields, notes }` |
+| POST | `/api/clients/:id/measurements` | Add `{ outfitType, description, fields, notes, unit }` |
 | DELETE | `/api/clients/:id/measurements/:measId` | Delete a measurement |
 
-`fields` is an object of measurement name to value in cm, e.g.
-`{ "Chest": "42", "Waist": "34" }`; its key order is preserved.
+`fields` is an object of measurement name to value, e.g.
+`{ "Chest": "42", "Waist": "34" }`; its key order is preserved. `unit` (`"in"` or
+`"cm"`) is the unit the values were entered in. It defaults to `"cm"` when omitted,
+which is what app versions before units meant. Values are stored as entered; the app
+converts for display and PDF export.
