@@ -1,5 +1,17 @@
 apply plugin: 'com.android.application'
 
+// Release signing reads android/keystore.properties (gitignored), or the
+// TRACKSEAM_* environment variables in CI. See docs/RELEASE.md.
+def keystoreProps = new Properties()
+def keystorePropsFile = rootProject.file('keystore.properties')
+if (keystorePropsFile.exists()) {
+    keystorePropsFile.withInputStream { keystoreProps.load(it) }
+}
+def signingValue = { String key, String envKey ->
+    keystoreProps.getProperty(key) ?: System.getenv(envKey)
+}
+def releaseStoreFile = signingValue('storeFile', 'TRACKSEAM_KEYSTORE_FILE')
+
 android {
     namespace = "com.trackseam.app"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -7,8 +19,9 @@ android {
         applicationId "com.trackseam.app"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        // Must be higher than every versionCode already uploaded to Play.
+        versionCode 10
+        versionName "1.1.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -16,8 +29,21 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        release {
+            if (releaseStoreFile) {
+                storeFile file(releaseStoreFile)
+                storePassword signingValue('storePassword', 'TRACKSEAM_KEYSTORE_PASSWORD')
+                keyAlias signingValue('keyAlias', 'TRACKSEAM_KEY_ALIAS')
+                keyPassword signingValue('keyPassword', 'TRACKSEAM_KEY_PASSWORD')
+            }
+        }
+    }
     buildTypes {
         release {
+            if (releaseStoreFile) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }

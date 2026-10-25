@@ -1,55 +1,90 @@
-const router = require("express").Router();
-const auth   = require("../middleware/auth");
-const Client = require("../models/Client");
+const router    = require("express").Router();
+const auth      = require("../middleware/auth");
+const prisma    = require("../lib/prisma");
+const serialize = require("../lib/serialize");
+const { str, tooLong } = require("../lib/validate");
 
 router.use(auth);
 
-// GET /api/clients/:id/measurements 
-router.get("/:id/measurements", async (req, res) => {
+const LIMITS = { outfitType: 60, description: 255, notes: 5000 };
+const MAX_FIELDS = 60;
+
+const ownedClient = (req) =>
+  prisma.client.findFirst({ where: { id: req.params.id, tailorId: req.tailor.id } });
+
+// Accepts { name: value } and returns a clean copy, or null if malformed.
+const cleanFields = (fields) => {
+  if (fields == null) return {};
+  if (typeof fields !== "object" || Array.isArray(fields)) return null;
+  const entries = Object.entries(fields);
+  if (entries.length > MAX_FIELDS) return null;
+  const out = {};
+  for (const [k, v] of entries) {
+    const key = String(k).trim().slice(0, 60);
+    if (!key) continue;
+    out[key] = v == null ? "" : String(v).trim().slice(0, 20);
+  }
+  return out;
+};
+
+// GET /api/clients/:id/measurements
+router.get("/:id/measurements", async (req, res, next) => {
   try {
-    const client = await Client.findOne({ _id: req.params.id, tailor: req.tailor._id });
+    const client = await ownedClient(req);
     if (!client) return res.status(404).json({ error: "Client not found." });
 
-    const sorted = [...client.measurements].sort(
-      (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
-    );
-    res.json(sorted);
+    const measurements = await prisma.measurement.findMany({
+      where:   { clientRefId: client.id },
+      orderBy: { createdAt: "desc" },
+    });
+    res.json(measurements.map(serialize.measurement));
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 
 // POST /api/clients/:id/measurements
-router.post("/:id/measurements", async (req, res) => {
+router.post("/:id/measurements", async (req, res, next) => {
   try {
-    const { outfitType, description, fields, notes } = req.body;
-    if (!outfitType || !description)
+    const data = {
+      outfitType:  str(req.body.outfitType),
+      description: str(req.body.description),
+      notes:       str(req.body.notes),
+    };
+    if (!data.outfitType || !data.description)
       return res.status(400).json({ error: "outfitType and description are required." });
 
-    const client = await Client.findOne({ _id: req.params.id, tailor: req.tailor._id });
+    const long = tooLong(LIMITS, data);
+    if (long) return res.status(400).json({ error: `${long} is too long (max ${LIMITS[long]} characters).` });
+
+    const fields = cleanFields(req.body.fields);
+    if (!fields) return res.status(400).json({ error: `fields must be an object with at most ${MAX_FIELDS} entries.` });
+
+    const client = await ownedClient(req);
     if (!client) return res.status(404).json({ error: "Client not found." });
 
-    client.measurements.push({ outfitType, description, fields, notes });
-    await client.save();
-
-    const saved = client.measurements[client.measurements.length - 1];
-    res.status(201).json(saved);
+    const saved = await prisma.measurement.create({
+      data: { ...data, fields: JSON.stringify(fields), clientRefId: client.id },
+    });
+    res.status(201).json(serialize.measurement(saved));
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 
 // DELETE /api/clients/:id/measurements/:measId
-router.delete("/:id/measurements/:measId", async (req, res) => {
+router.delete("/:id/measurements/:measId", async (req, res, next) => {
   try {
-    const client = await Client.findOne({ _id: req.params.id, tailor: req.tailor._id });
+    const client = await ownedClient(req);
     if (!client) return res.status(404).json({ error: "Client not found." });
 
-    client.measurements.pull({ _id: req.params.measId });
-    await client.save();
+    const { count } = await prisma.measurement.deleteMany({
+      where: { id: req.params.measId, clientRefId: client.id },
+    });
+    if (!count) return res.status(404).json({ error: "Measurement not found." });
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 
