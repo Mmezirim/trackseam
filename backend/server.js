@@ -28,8 +28,9 @@ app.use(helmet());
 // Origins the native apps load from: Capacitor serves the bundled web app
 // from https://localhost on Android and capacitor://localhost on iOS.
 const NATIVE_ORIGINS = ["https://localhost", "http://localhost", "capacitor://localhost", "ionic://localhost"];
-// trackseam.com hosts copies of the delete-account and reset-password pages.
-const WEBSITE_ORIGINS = ["https://trackseam.com", "https://www.trackseam.com"];
+// app.trackseam.com is the web version of the app; trackseam.com hosts copies
+// of the delete-account and reset-password pages.
+const WEBSITE_ORIGINS = ["https://app.trackseam.com", "https://trackseam.com", "https://www.trackseam.com"];
 const allowedOrigins = new Set([
   ...NATIVE_ORIGINS,
   ...WEBSITE_ORIGINS,
